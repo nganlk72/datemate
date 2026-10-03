@@ -1,0 +1,1 @@
+const fs = require('fs'); const https = require('https'); const env = fs.readFileSync('.env.local', 'utf8'); const key = env.split('\n').find(l ==')[1].trim(); const points = '
