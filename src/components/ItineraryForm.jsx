@@ -1,18 +1,25 @@
-import { useState } from 'react';
-import { Search, Trash2, Navigation } from 'lucide-react';
+import { Search, Trash2, Navigation, MapPin } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
-
+import { useState } from 'react';
 import { searchAddress, geocodeRef } from '../lib/vietmap';
 
-export default function ItineraryForm({ 
-  locations, 
-  setLocations, 
-  travelMode, 
+function getLocationName(location) {
+  return location.name || location.displayName || 'Unnamed place';
+}
+
+function getLocationType(location) {
+  return location.category || 'Place';
+}
+
+export default function ItineraryForm({
+  locations,
+  setLocations,
+  travelMode,
   setTravelMode,
   onCalculateRoute,
   isCalculating,
   checkDuplicate,
-  setDuplicateMsg
+  setDuplicateMsg,
 }) {
   const [searchInput, setSearchInput] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -20,171 +27,283 @@ export default function ItineraryForm({
   const [isGeocoding, setIsGeocoding] = useState(false);
 
   const handleSearch = async (query) => {
-    if (!query) return;
+    const trimmedQuery = query.trim();
+
+    if (!trimmedQuery || isSearching || isGeocoding) return;
+
     setIsSearching(true);
+
     try {
-      const results = await searchAddress(query);
+      const results = await searchAddress(trimmedQuery);
       setSearchResults(results);
     } catch (error) {
-      console.error("Error searching location:", error);
+      console.error('Error searching location:', error);
+      setSearchResults([]);
     } finally {
       setIsSearching(false);
     }
   };
 
   const addLocation = async (result) => {
+    if (isGeocoding) return;
+
     setIsGeocoding(true);
+
     try {
       const details = await geocodeRef(result.ref_id);
-      if (details) {
-        const newLocation = {
-          id: crypto.randomUUID(),
-          displayName: details.display_name,
-          lat: parseFloat(details.lat),
-          lon: parseFloat(details.lon)
-        };
-        
-        if (checkDuplicate && checkDuplicate(newLocation, locations)) {
-          if (setDuplicateMsg) {
-            setDuplicateMsg("This place is already in your list");
-            setTimeout(() => setDuplicateMsg(''), 3000);
-          }
-          return;
-        }
 
-        setLocations([...locations, newLocation]);
-        setSearchInput('');
-        setSearchResults([]);
-      } else {
-        alert("Could not find coordinates for this location.");
+      if (!details) {
+        setDuplicateMsg?.('Could not find coordinates for this location.');
+        window.setTimeout(() => setDuplicateMsg?.(''), 3000);
+        return;
       }
+
+      const newLocation = {
+        id: crypto.randomUUID(),
+        name: details.display_name || result.display_name,
+        displayName: details.display_name || result.display_name,
+        lat: Number(details.lat),
+        lon: Number(details.lon),
+        category: 'place',
+      };
+
+      if (checkDuplicate?.(newLocation, locations)) {
+        setDuplicateMsg?.('That stop is already in your itinerary.');
+        window.setTimeout(() => setDuplicateMsg?.(''), 3000);
+        return;
+      }
+
+      setLocations((current) => [...current, newLocation]);
+      setSearchInput('');
+      setSearchResults([]);
     } catch (error) {
-      console.error("Geocoding failed:", error);
+      console.error('Geocoding failed:', error);
+      setDuplicateMsg?.('Could not add this place. Please try again.');
+      window.setTimeout(() => setDuplicateMsg?.(''), 3000);
     } finally {
       setIsGeocoding(false);
     }
   };
 
   const removeLocation = (id) => {
-    setLocations(locations.filter(loc => loc.id !== id));
+    setLocations((current) => current.filter((location) => location.id !== id));
+  };
+
+  const moveLocation = (index, direction) => {
+    const targetIndex = index + direction;
+
+    if (targetIndex < 0 || targetIndex >= locations.length) return;
+
+    setLocations((current) => {
+      const next = [...current];
+      [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+      return next;
+    });
   };
 
   const handleDragEnd = (result) => {
     if (!result.destination) return;
+
     const items = Array.from(locations);
     const [reorderedItem] = items.splice(result.source.index, 1);
+
     items.splice(result.destination.index, 0, reorderedItem);
     setLocations(items);
   };
 
+  const travelModes = [
+    { id: 'car', label: 'Car', icon: '🚗' },
+    { id: 'motorcycle', label: 'Motorbike', icon: '🛵' },
+    { id: 'foot', label: 'Walk', icon: '🚶' },
+  ];
+
   return (
-    <div className="bg-white p-4 rounded-lg shadow-md flex flex-col h-full overflow-y-auto">
-      <h2 className="text-xl font-bold mb-4 flex items-center">
-        <Navigation className="mr-2" /> Plan Itinerary
-      </h2>
-
-      <div className="mb-6">
-        <label className="block text-sm font-medium text-gray-700 mb-2">Travel Mode</label>
-        <div className="flex space-x-2">
-          {[
-            { id: 'car', label: 'Car 🚗' },
-            { id: 'motorcycle', label: 'Motorbike 🛵' },
-            { id: 'foot', label: 'Walking 🚶' }
-          ].map((mode) => (
-            <button
-              key={mode.id}
-              onClick={() => setTravelMode(mode.id)}
-              className={`flex-1 py-2 px-1 rounded text-sm font-medium transition ${
-                travelMode === mode.id 
-                  ? 'bg-blue-600 text-white shadow' 
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              {mode.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="mb-4 flex-1">
-        <label className="block text-sm font-medium text-gray-700 mb-2">Destinations</label>
-        {locations.length === 0 ? (
-          <p className="text-gray-500 text-sm mb-4">No locations added yet.</p>
-        ) : (
-          <DragDropContext onDragEnd={handleDragEnd}>
-            <Droppable droppableId="locations-list">
-              {(provided) => (
-                <ul {...provided.droppableProps} ref={provided.innerRef} className="space-y-2 mb-4">
-                  {locations.map((loc, index) => (
-                    <Draggable key={loc.id} draggableId={loc.id} index={index}>
-                      {(provided, snapshot) => (
-                        <li 
-                          ref={provided.innerRef}
-                          {...provided.draggableProps}
-                          {...provided.dragHandleProps}
-                          className={`flex items-start justify-between p-2 rounded border text-sm ${snapshot.isDragging ? 'bg-blue-100 shadow-md' : 'bg-white'}`}
-                        >
-                          <div className="flex items-start cursor-grab">
-                            <span className="font-bold mr-2 text-blue-600">{index + 1}.</span>
-                            <span className="truncate max-w-[200px]" title={loc.displayName}>{loc.displayName}</span>
-                          </div>
-                          <button onClick={() => removeLocation(loc.id)} className="text-red-500 hover:text-red-700 ml-2">
-                            <Trash2 size={16} />
-                          </button>
-                        </li>
-                      )}
-                    </Draggable>
-                  ))}
-                  {provided.placeholder}
-                </ul>
-              )}
-            </Droppable>
-          </DragDropContext>
-        )}
-
-        <div className="relative">
-          <div className="flex">
-            <input
-              type="text"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch(searchInput)}
-              placeholder="Search place..."
-              className="flex-1 border rounded-l px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-              disabled={isGeocoding}
-            />
-            <button 
-              onClick={() => handleSearch(searchInput)}
-              disabled={isSearching || isGeocoding}
-              className="bg-blue-500 text-white px-3 py-2 rounded-r hover:bg-blue-600 disabled:bg-blue-300"
-            >
-              {isSearching ? <span className="animate-pulse">...</span> : <Search size={16} />}
-            </button>
+    <>
+      <div className="stops-card">
+        <div className="section-heading">
+          <div>
+            <h2>Your stops</h2>
+            <p>Reorder or remove places before routing.</p>
           </div>
-          
+          <span>{locations.length}</span>
+        </div>
+
+        <DragDropContext onDragEnd={handleDragEnd}>
+          <Droppable droppableId="locations-list">
+            {(provided) => (
+              <div
+                className="stop-list"
+                ref={provided.innerRef}
+                {...provided.droppableProps}
+              >
+                {locations.length === 0 ? (
+                  <p className="stop-list-empty">No places added yet.</p>
+                ) : (
+                  locations.map((location, index) => {
+                    const name = getLocationName(location);
+                    const type = getLocationType(location);
+
+                    return (
+                      <Draggable
+                        key={location.id}
+                        draggableId={String(location.id)}
+                        index={index}
+                      >
+                        {(providedDraggable, snapshot) => (
+                          <div
+                            ref={providedDraggable.innerRef}
+                            {...providedDraggable.draggableProps}
+                            className={`stop-row ${
+                              snapshot.isDragging ? 'dragging' : ''
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              className="drag-handle"
+                              {...providedDraggable.dragHandleProps}
+                              aria-label={`Drag to reorder ${name}`}
+                            >
+                              ⠿
+                            </button>
+
+                            <span className="stop-number">{index + 1}</span>
+
+                            <span className="stop-copy">
+                              <strong title={name}>{name}</strong>
+                              <small>{type}</small>
+                            </span>
+
+                            <span className="reorder-controls">
+                              <button
+                                type="button"
+                                onClick={() => moveLocation(index, -1)}
+                                disabled={index === 0}
+                                aria-label={`Move ${name} up`}
+                              >
+                                ↑
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => moveLocation(index, 1)}
+                                disabled={index === locations.length - 1}
+                                aria-label={`Move ${name} down`}
+                              >
+                                ↓
+                              </button>
+
+                              <button
+                                type="button"
+                                className="remove-button"
+                                onClick={() => removeLocation(location.id)}
+                                aria-label={`Remove ${name}`}
+                              >
+                                <Trash2 size={16} aria-hidden="true" />
+                              </button>
+                            </span>
+                          </div>
+                        )}
+                      </Draggable>
+                    );
+                  })
+                )}
+
+                {provided.placeholder}
+              </div>
+            )}
+          </Droppable>
+        </DragDropContext>
+
+        <div className="place-search">
+          <Search className="search-icon" size={16} aria-hidden="true" />
+
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                handleSearch(searchInput);
+              }
+            }}
+            placeholder="Search for another place"
+            aria-label="Search for another place"
+            disabled={isGeocoding}
+          />
+
+          {isSearching && (
+            <span className="spinner search-spinner" aria-hidden="true" />
+          )}
+
           {searchResults.length > 0 && (
-            <ul className="absolute z-20 w-full bg-white border mt-1 max-h-60 overflow-y-auto shadow-lg rounded">
-              {searchResults.map((result, idx) => (
-                <li 
-                  key={idx} 
-                  onClick={() => addLocation(result)}
-                  className={`p-2 border-b hover:bg-gray-100 cursor-pointer text-sm ${isGeocoding ? 'opacity-50 pointer-events-none' : ''}`}
-                >
-                  {result.display_name}
-                </li>
-              ))}
-            </ul>
+            <div className="place-results">
+              {searchResults.map((result, index) => {
+                const [title, ...addressParts] = (
+                  result.display_name || ''
+                ).split(',');
+
+                return (
+                  <button
+                    type="button"
+                    key={result.ref_id || `${result.display_name}-${index}`}
+                    onClick={() => addLocation(result)}
+                    disabled={isGeocoding}
+                  >
+                    <span className="result-pin">
+                      <MapPin size={15} aria-hidden="true" />
+                    </span>
+
+                    <span>
+                      <strong>{title || result.display_name}</strong>
+                      {addressParts.length > 0 && (
+                        <small>{addressParts.join(',').trim()}</small>
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>
 
-      <button
-        onClick={onCalculateRoute}
-        disabled={locations.length < 2 || isCalculating}
-        className="w-full bg-green-600 text-white font-bold py-3 rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed mt-4"
-      >
-        {isCalculating ? 'Calculating...' : 'Calculate Route'}
-      </button>
-    </div>
+      <div className="route-builder">
+        <label>Travel mode</label>
+
+        <div className="travel-switch" aria-label="Travel mode">
+          {travelModes.map((mode) => (
+            <button
+              type="button"
+              key={mode.id}
+              className={travelMode === mode.id ? 'active' : ''}
+              aria-pressed={travelMode === mode.id}
+              onClick={() => setTravelMode(mode.id)}
+            >
+              <span aria-hidden="true">{mode.icon}</span>
+              {mode.label}
+            </button>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          className="primary-button calculate-button"
+          onClick={onCalculateRoute}
+          disabled={locations.length < 2 || isCalculating}
+          aria-busy={isCalculating}
+        >
+          {isCalculating && (
+            <span className="spinner" aria-hidden="true" />
+          )}
+
+          {isCalculating
+            ? 'Calculating route'
+            : locations.length < 2
+              ? 'Add at least 2 places'
+              : 'Calculate route'}
+        </button>
+      </div>
+    </>
   );
 }

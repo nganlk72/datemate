@@ -1,220 +1,357 @@
-import { useState, useRef, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { extractTripParameters } from '../lib/ai';
 import { fetchVietmapPoi } from '../lib/vietmapPoi';
 import { searchAddress, geocodeRef } from '../lib/vietmap';
 import { Wand2, Loader2 } from 'lucide-react';
 
-const GEMINI_TIMEOUT_MS = 20000;
+const GEMINI_TIMEOUT_MS = 8000;
 const VIETMAP_TIMEOUT_MS = 20000;
 
-/**
- * Module-level cache: lowercased city name → { lat, lon } | null
- * Persists across re-renders; resets on full page reload.
- * Prevents repeated Autocomplete + Place v4 calls for the same city name.
- */
-const _cityGeoCache = new Map();
+const cityGeoCache = new Map();
 
-/**
- * Resolves a city name to map coordinates via Vietmap Autocomplete v4 + Place v4.
- * Returns { lat, lon } on success, null if no results or geocode fails.
- * API cost: 1 Autocomplete call + 1 Place call (both skipped on cache hit).
- */
+const CITY_ALIASES = {
+  hanoi: 'Hanoi',
+  'ha noi': 'Hanoi',
+  'hà nội': 'Hanoi',
+  'ho chi minh': 'Ho Chi Minh City',
+  'ho chi minh city': 'Ho Chi Minh City',
+  'thanh pho ho chi minh': 'Ho Chi Minh City',
+  'thành phố hồ chí minh': 'Ho Chi Minh City',
+  hcm: 'Ho Chi Minh City',
+  hcmc: 'Ho Chi Minh City',
+  danang: 'Da Nang',
+  'da nang': 'Da Nang',
+  'đà nẵng': 'Da Nang',
+};
+
+const CATEGORY_KEYWORDS = [
+  ['restaurant', /\b(restaurant|food|eat|dinner|lunch|đồ ăn|ăn uống|nhà hàng)\b/i],
+  ['cafe', /\b(cafe|coffee|café|cà phê)\b/i],
+  ['museum', /\b(museum|museums|bảo tàng)\b/i],
+  ['attraction', /\b(sightseeing|attraction|landmark|tham quan|địa điểm)\b/i],
+  ['park', /\b(park|outdoors|nature|công viên|ngoài trời)\b/i],
+  ['shopping', /\b(shopping|mall|market|mua sắm|chợ)\b/i],
+  ['bar', /\b(bar|pub|nightlife|bia|quán bar)\b/i],
+];
+
+function normalizeText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function extractCityLocally(promptText) {
+  const normalized = normalizeText(promptText);
+
+  for (const [alias, city] of Object.entries(CITY_ALIASES)) {
+    if (normalized.includes(normalizeText(alias))) {
+      return city;
+    }
+  }
+
+  const inCityMatch = promptText.match(
+    /\b(?:in|around|near|at|ở|tại|gần)\s+([A-Za-zÀ-ỹ][A-Za-zÀ-ỹ\s-]{1,40}?)(?=\s+(?:on|this|for|with|around|near|in|under|budget|looking|wanting|and|,|\.|$))/i,
+  );
+
+  return inCityMatch?.[1]?.trim() || '';
+}
+
+function extractBudgetLocally(promptText) {
+  const match = promptText.match(
+    /(\d[\d.,]*)\s*(k|thousand|000)?\s*(?:vnd|đ|dong)?/i,
+  );
+
+  if (!match) return null;
+
+  const rawNumber = match[1].replace(/[.,]/g, '');
+  const amount = Number(rawNumber);
+
+  if (!Number.isFinite(amount)) return null;
+
+  const suffix = String(match[2] || '').toLowerCase();
+
+  if (suffix === 'k' || suffix === 'thousand') {
+    return amount * 1000;
+  }
+
+  return amount;
+}
+
+function extractHeadcountLocally(promptText) {
+  const match = promptText.match(
+    /(?:^|\s)(\d+)\s*(?:of us|people|persons|friends|người|bạn)/i,
+  );
+
+  return match ? Number(match[1]) : 1;
+}
+
+function extractCategoriesLocally(promptText) {
+  const categories = CATEGORY_KEYWORDS
+    .filter(([, pattern]) => pattern.test(promptText))
+    .map(([category]) => category);
+
+  return categories.length > 0 ? categories : ['attraction', 'cafe'];
+}
+
+function extractLocalParameters(promptText) {
+  return {
+    city: extractCityLocally(promptText),
+    budget: extractBudgetLocally(promptText),
+    headcount: extractHeadcountLocally(promptText),
+    categories: extractCategoriesLocally(promptText),
+  };
+}
+
+function mergeParameters(localParams, aiParams) {
+  return {
+    headcount: aiParams?.headcount || localParams.headcount || 1,
+    budget: aiParams?.budget ?? localParams.budget,
+    city: aiParams?.city || localParams.city,
+    categories:
+      Array.isArray(aiParams?.categories) && aiParams.categories.length > 0
+        ? aiParams.categories
+        : localParams.categories,
+  };
+}
+
 async function geocodeCityCenter(cityName, signal) {
-  const key = cityName.toLowerCase();
-  if (_cityGeoCache.has(key)) return _cityGeoCache.get(key);
+  const key = cityName.toLowerCase().trim();
+
+  if (cityGeoCache.has(key)) {
+    return cityGeoCache.get(key);
+  }
+
   const items = await searchAddress(cityName, null, null, null, signal);
+
   if (!items.length || !items[0].ref_id) {
-    _cityGeoCache.set(key, null);
+    cityGeoCache.set(key, null);
     return null;
   }
+
   const coords = await geocodeRef(items[0].ref_id, signal);
-  const result = coords ? { lat: coords.lat, lon: coords.lon } : null;
-  _cityGeoCache.set(key, result);
+  const result = coords
+    ? { lat: Number(coords.lat), lon: Number(coords.lon) }
+    : null;
+
+  cityGeoCache.set(key, result);
   return result;
 }
 
-export default function SmartPrompt({ onLocationsDiscovered }) {
-  const [prompt, setPrompt] = useState('5 of us wanting to hang out in Hanoi on Saturday afternoon, around 300k VND, food and sightseeing.');
+function withTimeout(promise, timeoutMs, errorCode) {
+  let timer;
+
+  const timeout = new Promise((_, reject) => {
+    timer = window.setTimeout(() => {
+      reject(new Error(errorCode));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    window.clearTimeout(timer);
+  });
+}
+
+export default function SmartPrompt({
+  onLocationsDiscovered,
+  onSearchStateChange,
+}) {
+  const [prompt, setPrompt] = useState(
+    '5 of us wanting to hang out in Hanoi on Saturday afternoon, around 300k VND, food and sightseeing.',
+  );
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusText, setStatusText] = useState('');
 
   const abortControllerRef = useRef(null);
+  const runIdRef = useRef(0);
 
-  // Clean up any pending Vietmap requests on unmount
   useEffect(() => {
     return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
+      abortControllerRef.current?.abort();
+      runIdRef.current += 1;
     };
   }, []);
 
   const handleGenerate = async () => {
-    if (!prompt) return;
+    const trimmedPrompt = prompt.trim();
 
-    // A new AbortController must be created at the START of every handleGenerate run.
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort(); // abort any previous run still going
+    if (!trimmedPrompt || isProcessing) return;
+
+    abortControllerRef.current?.abort();
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    const { signal } = controller;
+    const runId = ++runIdRef.current;
+    const localParams = extractLocalParameters(trimmedPrompt);
+
+    const isCurrentRun = () => runId === runIdRef.current;
+
+    if (!localParams.city) {
+      onSearchStateChange?.({
+        state: 'failed',
+        message: 'Please include a city, for example “cafes and museums in Hanoi”.',
+      });
+      return;
     }
-    abortControllerRef.current = new AbortController();
-    const signal = abortControllerRef.current.signal;
 
     setIsProcessing(true);
-    setStatusText('Thinking (Extracting parameters)...');
-    
-    let hasError = false; // Used to prevent finally{} from erasing error messages
+    setStatusText('Reading your plan');
+
+    onSearchStateChange?.({
+      state: 'searching',
+      message: 'Reading your plan',
+    });
 
     try {
-      // ── Stage 1: Gemini parameter extraction (own budget) ──────────────
-      let geminiTimer;
-      const geminiTimeout = new Promise((_, reject) =>
-        geminiTimer = setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS)
-      );
+      let aiParams = null;
 
-      const geminiPromise = extractTripParameters(prompt);
-      geminiPromise.catch(() => {}); // Prevent unhandled rejection if timeout wins
-
-      let params;
       try {
-        params = await Promise.race([
-          geminiPromise,
-          geminiTimeout
-        ]);
-        clearTimeout(geminiTimer);
-      } catch (err) {
-        clearTimeout(geminiTimer);
-        console.warn("AI extraction failed or timed out. Using fallback parameters. Error:", err.message);
-        params = { headcount: 5, budget: 300000, city: "Hanoi", categories: ["attraction", "cafe"] };
+        const aiPromise = extractTripParameters(trimmedPrompt);
+        aiPromise.catch(() => {});
+
+        aiParams = await withTimeout(
+          aiPromise,
+          GEMINI_TIMEOUT_MS,
+          'GEMINI_TIMEOUT',
+        );
+      } catch (error) {
+        console.warn(
+          'Gemini unavailable; continuing with local parameters:',
+          error.message,
+        );
       }
 
+      if (!isCurrentRun()) return;
+
+      const params = mergeParameters(localParams, aiParams);
+
       if (!params.city) {
-        setStatusText("Couldn't determine the city from your prompt. Please include a city name.");
         setIsProcessing(false);
-        hasError = true;
+        onSearchStateChange?.({
+          state: 'failed',
+          message: 'Please include a city, then try again.',
+        });
         return;
       }
 
-      setStatusText(`Searching Vietmap for ${params.categories.join(', ')} in ${params.city}...`);
+      setStatusText(`Searching Vietmap around ${params.city}`);
 
-      // ── Stage 2: Vietmap geocode + POI search (fresh budget) ──────────
-      let vietmapTimer;
-      const vietmapTimeout = new Promise((_, reject) =>
-        vietmapTimer = setTimeout(() => {
-          abortControllerRef.current?.abort();
-          reject(new Error("VIETMAP_TIMEOUT"));
-        }, VIETMAP_TIMEOUT_MS)
-      );
+      onSearchStateChange?.({
+        state: 'searching',
+        message: `Searching Vietmap around ${params.city}`,
+      });
 
       const vietmapPromise = (async () => {
         let cityCenter = null;
+
         try {
           cityCenter = await geocodeCityCenter(params.city, signal);
-          if (!cityCenter) {
-            console.warn(
-              `[SmartPrompt] Could not geocode city "${params.city}". ` +
-              `Falling back to focus-only search (no circle constraint).`
-            );
-          }
-        } catch (err) {
-          if (err.name === 'AbortError') throw err;
-          console.warn(`[SmartPrompt] City geocode error for "${params.city}":`, err.message);
+        } catch (error) {
+          if (error.name === 'AbortError') throw error;
+          console.warn(`Could not geocode "${params.city}":`, error);
         }
+
         return fetchVietmapPoi(
           params.city,
           params.categories,
           cityCenter?.lat ?? null,
           cityCenter?.lon ?? null,
           cityCenter ? 5000 : null,
-          signal
+          signal,
         );
       })();
-      vietmapPromise.catch(() => {}); // Prevent unhandled rejection if aborted
 
-      let places;
-      try {
-        places = await Promise.race([
-          vietmapPromise,
-          vietmapTimeout
-        ]);
-        clearTimeout(vietmapTimer);
-      } catch (err) {
-        clearTimeout(vietmapTimer);
-        
-        const timedOut = err.message === "VIETMAP_TIMEOUT";
-        
-        // Match variations like "Hanoi", "Hà Nội", "Ha Noi", "Hanoi, Vietnam", "Hà Nội, Việt Nam"
-        const normCity = params.city.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-        const isHanoi = /^(ha noi|hanoi)(, (viet nam|vietnam))?$/.test(normCity);
+      vietmapPromise.catch(() => {});
 
-        if (isHanoi) {
-          console.warn(
-            timedOut
-              ? "Vietmap POI search timed out after 20 s. Using fallback locations."
-              : `Vietmap POI search failed: ${err.message}. Using fallback locations.`
-          );
-          if (timedOut) {
-            setStatusText('⏱ Vietmap search timed out — using nearby defaults.');
-            await new Promise(r => setTimeout(r, 2000));
-          }
-          // Fallback places in Hanoi
-          places = [
-            { name: "Hoan Kiem Lake", lat: 21.0289, lon: 105.8522, category: "attraction" },
-            { name: "Temple of Literature", lat: 21.0294, lon: 105.8355, category: "attraction" },
-            { name: "St. Joseph's Cathedral", lat: 21.0287, lon: 105.8489, category: "attraction" },
-            { name: "Dong Xuan Market", lat: 21.0379, lon: 105.8509, category: "market" }
-          ];
-        } else {
-          // If the target city was NOT Hanoi, do not silently fallback to Hanoi.
-          // Keep the prompt in the text box so they can retry.
-          const msg = timedOut
-            ? "⏱ Vietmap search timed out. Please try again."
-            : `❌ Vietmap search failed: ${err.message}. Please try again.`;
-          setStatusText(msg);
-          setIsProcessing(false);
-          hasError = true;
-          return;
-        }
+      const places = await withTimeout(
+        vietmapPromise,
+        VIETMAP_TIMEOUT_MS,
+        'VIETMAP_TIMEOUT',
+      );
+
+      if (!isCurrentRun()) return;
+
+      if (!places || places.length === 0) {
+        setIsProcessing(false);
+        setStatusText('');
+
+        onSearchStateChange?.({
+          state: 'noPlaces',
+          message: `No matching places were found around ${params.city}.`,
+        });
+        return;
       }
+
       onLocationsDiscovered(places, params);
-      setStatusText('Done!');
+
+      setIsProcessing(false);
+      setStatusText('Done');
+
+      window.setTimeout(() => {
+        if (runId === runIdRef.current) {
+          setStatusText('');
+        }
+      }, 2500);
     } catch (error) {
-      console.error(error);
-      setStatusText('❌ Error processing prompt. Check console for details.');
+      if (error.name === 'AbortError') return;
+      if (!isCurrentRun()) return;
+
+      console.error('Vietmap search failed:', error);
+
       setIsProcessing(false);
-      hasError = true;
-    } finally {
-      setIsProcessing(false);
-      // Only clear the status text automatically if there wasn't an error,
-      // so the user actually has time to read error messages.
-      if (!hasError) {
-        setTimeout(() => setStatusText(''), 3000);
-      }
+      setStatusText('');
+
+      onSearchStateChange?.({
+        state: 'failed',
+        message:
+          error.message === 'VIETMAP_TIMEOUT'
+            ? 'Vietmap search took too long. Please try again.'
+            : 'Vietmap search failed. Check your connection and try again.',
+      });
     }
   };
 
   return (
-    <div className="bg-white p-4 rounded-lg shadow-md border border-purple-200 mb-4">
-      <h3 className="font-bold mb-2 flex items-center text-purple-700">
-        <Wand2 className="mr-2" size={18} /> Smart AI Planner
-      </h3>
+    <div className="prompt-card">
+      <label htmlFor="trip-prompt">Describe your day</label>
+
       <textarea
+        id="trip-prompt"
         value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        className="w-full border rounded p-2 text-sm focus:ring-2 focus:ring-purple-400 focus:outline-none resize-none"
-        rows="3"
-        placeholder="Describe your ideal trip... (e.g. 5 of us in Hanoi looking for cafes and museums)"
-      />
-      <button
-        onClick={handleGenerate}
+        onChange={(event) => setPrompt(event.target.value)}
+        placeholder="Coffee, museums, local food, and a budget..."
+        aria-label="Describe your day"
         disabled={isProcessing}
-        className="w-full mt-2 bg-purple-600 hover:bg-purple-700 text-white py-2 rounded font-bold flex justify-center items-center disabled:opacity-50"
+      />
+
+      <button
+        type="button"
+        className="primary-button"
+        onClick={handleGenerate}
+        disabled={isProcessing || !prompt.trim()}
+        aria-busy={isProcessing}
       >
         {isProcessing ? (
-          <><Loader2 className="animate-spin mr-2" size={16} /> {statusText}</>
+          <>
+            <Loader2 className="spinner" size={16} aria-hidden="true" />
+            Searching Vietmap
+          </>
         ) : (
-          'Generate Magic Itinerary'
+          <>
+            <Wand2 size={16} aria-hidden="true" />
+            Find places
+          </>
         )}
       </button>
+
+      {isProcessing && (
+        <div className="find-progress" role="status" aria-live="polite">
+          <span className="spinner" aria-hidden="true" />
+          <span>{statusText || 'Searching Vietmap'}</span>
+        </div>
+      )}
     </div>
   );
 }

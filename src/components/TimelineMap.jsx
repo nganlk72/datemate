@@ -40,6 +40,9 @@ function esc(str) {
     .replace(/"/g, '&quot;');
 }
 
+/** Names are compared trimmed + lowercase (same rule as Timeline.jsx). */
+const normName = (s) => (s || '').trim().toLowerCase();
+
 /**
  * Idempotent: add all GeoJSON sources and line layers needed by TimelineMap.
  * Safe to call on every style.load — existing sources/layers are skipped.
@@ -66,7 +69,7 @@ function initSources(m) {
   };
 
   addSrc('group-route');  addLine('group-route-layer', 'group-route', '#4f46e5', 5, 0.85, null);
-  addSrc('my-route');     addLine('my-route-layer',    'my-route',    '#ea580c', 5, 0.9,  null);
+  addSrc('my-route');     addLine('my-route-layer',    'my-route',    '#ea580c', 6, 0.95, null);
   for (let i = 0; i < 10; i++) {
     addSrc(`p-route-${i}`);
     addLine(`p-route-layer-${i}`, `p-route-${i}`, '#888888', 3, 0.7, [4, 4]);
@@ -75,12 +78,21 @@ function initSources(m) {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
+/**
+ * Props
+ *  - groupRoute : the SHARED route (gathering point → every stop)
+ *  - myRoute    : my full route (my start → gathering point → every stop), already stitched
+ *  - myStart    : my REGISTERED start point { lat, lon } (not the live GPS position)
+ *  - myName     : used to show only my own live marker in My Route mode
+ */
 export default function TimelineMap({
   locations,
   trip,
   groupRoute,
   personalRoutes,
-  myPersonalRoute,
+  myRoute,
+  myStart,
+  myName,
   liveUsers,
   mapMode,
   allPositions
@@ -89,9 +101,10 @@ export default function TimelineMap({
   const mapRef          = useRef(null);
   const markersRef      = useRef([]);
   const appliedStyleRef = useRef(INITIAL_STYLE); // tracks the style currently loaded on the map
+  const prevFitDepsRef  = useRef(null);          // lets us refit only when the route / mode data changed
   const propsRef        = useRef({
     locations, trip, groupRoute, personalRoutes,
-    myPersonalRoute, liveUsers, mapMode, allPositions
+    myRoute, myStart, myName, liveUsers, mapMode, allPositions
   });
 
   const [currentStyle, setCurrentStyle] = useState(INITIAL_STYLE);
@@ -100,21 +113,24 @@ export default function TimelineMap({
   useEffect(() => {
     propsRef.current = {
       locations, trip, groupRoute, personalRoutes,
-      myPersonalRoute, liveUsers, mapMode, allPositions
+      myRoute, myStart, myName, liveUsers, mapMode, allPositions
     };
   }); // intentionally no dep array — runs after every render
 
   // ── updateMapData: stable identity, reads latest props from propsRef ──────────
-  const updateMapData = useCallback(({ force = false } = {}) => {
+  // fit=false repaints without moving the camera (used for live-location updates and style switches).
+  const updateMapData = useCallback(({ force = false, fit = true } = {}) => {
     const m = mapRef.current;
-    if (!force && !m?.isStyleLoaded()) return;
+    if (!m || (!force && !m.isStyleLoaded())) return;
 
     const {
       locations: locs,
       trip: tr,
       groupRoute: gr,
       personalRoutes: pr,
-      myPersonalRoute: mpr,
+      myRoute: mine,
+      myStart: start,
+      myName: me,
       liveUsers: lu,
       mapMode: mode
     } = propsRef.current;
@@ -126,7 +142,8 @@ export default function TimelineMap({
     const bounds = new LngLatBounds();
     let hasPoints = false;
 
-    const addMarker = (lat, lon, html, popupHtml) => {
+    // inBounds=false keeps a marker out of the camera fit (live GPS markers must not move the camera).
+    const addMarker = (lat, lon, html, popupHtml, inBounds = true) => {
       if (!lat || !lon) return;
       const el = document.createElement('div');
       el.innerHTML = html;
@@ -134,8 +151,10 @@ export default function TimelineMap({
       if (popupHtml) mk.setPopup(new Popup({ offset: 25 }).setHTML(popupHtml));
       mk.addTo(m);
       markersRef.current.push(mk);
-      bounds.extend([lon, lat]);
-      hasPoints = true;
+      if (inBounds) {
+        bounds.extend([lon, lat]);
+        hasPoints = true;
+      }
     };
 
     // Destination number markers
@@ -156,14 +175,27 @@ export default function TimelineMap({
       );
     }
 
-    // Live user markers — participant_name and avatar_emoji are user-controlled, must escape
-    Object.values(lu || {}).forEach(u => {
+    // My registered start point — shown in My Route mode so it is clear where the line begins
+    if (mode !== 'overview' && start?.lat && start?.lon) {
       addMarker(
-        u.lat, u.lon,
-        `<div style="width:36px;height:36px;background:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;border:2px solid #6366f1;box-shadow:0 2px 8px rgba(0,0,0,0.25);">${esc(u.avatar_emoji || '👤')}</div>`,
-        esc(u.participant_name)
+        start.lat, start.lon,
+        `<div style="padding:3px 10px;background:#16a34a;color:white;border-radius:999px;font-size:11px;font-weight:700;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);">Start</div>`,
+        'Your start location'
       );
-    });
+    }
+
+    // Live user markers — participant_name and avatar_emoji are user-controlled, must escape.
+    // In My Route mode only my own marker is shown. Live markers never affect the camera fit.
+    Object.values(lu || {})
+      .filter(u => mode === 'overview' || normName(u.participant_name) === normName(me))
+      .forEach(u => {
+        addMarker(
+          u.lat, u.lon,
+          `<div style="width:36px;height:36px;background:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;border:2px solid #6366f1;box-shadow:0 2px 8px rgba(0,0,0,0.25);">${esc(u.avatar_emoji || '👤')}</div>`,
+          esc(u.participant_name),
+          false
+        );
+      });
 
     // Route helpers
     const setRoute = (srcId, coords) => {
@@ -191,13 +223,14 @@ export default function TimelineMap({
         }
       }
     } else {
-      // Navigation mode — show only my personal route
+      // My Route mode — only my own full route (start → gathering point → every stop).
+      // Other people's lines and the shared line are hidden.
       setRoute('group-route', []);
       for (let i = 0; i < 10; i++) setRoute(`p-route-${i}`, []);
-      setRoute('my-route', mpr?.geometry?.coordinates || []);
+      setRoute('my-route', mine?.geometry?.coordinates || []);
     }
 
-    if (hasPoints) m.fitBounds(bounds, { padding: 50, duration: 800 });
+    if (fit && hasPoints) m.fitBounds(bounds, { padding: 50, duration: 800 });
   }, []); // stable — all prop reads go through propsRef
 
   // ── Effect 2: create map once ─────────────────────────────────────────────────
@@ -205,7 +238,7 @@ export default function TimelineMap({
     if (mapRef.current) return;
 
     const { allPositions: pos } = propsRef.current;
-    const initialCenter = pos.length > 0
+    const initialCenter = pos && pos.length > 0
       ? [pos[0][1], pos[0][0]]  // [lat, lon] → [lon, lat]
       : DEFAULT_CENTER;
 
@@ -244,7 +277,7 @@ export default function TimelineMap({
     // if the user switches styles rapidly before the previous style.load fires.
     function onStyleLoad() {
       initSources(m);
-      updateMapData({ force: true });
+      updateMapData({ force: true, fit: false }); // a style switch must not move the camera
     }
 
     m.on('style.load', onStyleLoad);
@@ -252,11 +285,16 @@ export default function TimelineMap({
   }, [currentStyle, updateMapData]);
 
   // ── Effect 4: repaint when data changes ───────────────────────────────────────
-  // allPositions is intentionally excluded: the parent creates a new array each render
-  // and including it would cause the map to re-fit on every render.
+  // The camera is refitted only when the route / stop / mode data changed — NOT when a live
+  // GPS marker moved. allPositions is intentionally excluded: the parent creates a new array
+  // each render and including it would cause the map to re-fit on every render.
   useEffect(() => {
-    updateMapData();
-  }, [locations, trip, groupRoute, personalRoutes, myPersonalRoute, liveUsers, mapMode, updateMapData]);
+    const fitDeps = [locations, trip, groupRoute, personalRoutes, myRoute, myStart, mapMode];
+    const prev = prevFitDepsRef.current;
+    const changed = !prev || fitDeps.some((d, i) => d !== prev[i]);
+    prevFitDepsRef.current = fitDeps;
+    updateMapData({ fit: changed });
+  }, [locations, trip, groupRoute, personalRoutes, myRoute, myStart, mapMode, liveUsers, updateMapData]);
 
   return (
     <div className="relative w-full h-full min-h-[400px]" style={{ minHeight: '100%' }}>

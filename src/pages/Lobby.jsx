@@ -1,52 +1,99 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { joinTrip, saveGeneratedItinerary } from '../lib/db';
 import { generateCompromiseItinerary } from '../lib/ai';
 import { fetchLocationsFromOverpass } from '../lib/overpass';
-import { searchAddress, geocodeRef } from '../lib/vietmap';
-import { Users, Copy, Check, Play, MapPin, Car, Bike, Footprints, Search, Loader2 } from 'lucide-react';
+import { useLocationSearch, useClickAway } from '../lib/useLocationSearch';
+import Icon from '../components/Icon';
+import './Lobby.css';
 
-const EMOJIS = ['🐶', '🐱', '🐼', '🦊', '🦁', '🐸', '🦄', '🦖', '🐙', '🦉'];
-const SUGGESTIONS = ['Cafe', 'Restaurant', 'Outdoors', 'Museum', 'Shopping', 'Park'];
+const EMOJIS = ['🌞', '🍜', '🌿', '🎨', '🛵', '✨'];
+const ACTIVITIES = ['Cafe', 'Restaurant', 'Outdoors', 'Museum', 'Shopping', 'Park'];
+const MODES = [['car', 'Car', 'car'], ['motorcycle', 'Motorbike', 'motorbike'], ['foot', 'Walk', 'walk']];
+const STEPS = ["Reading everyone's preferences", 'Finding places near the group', 'Saving your itinerary'];
 
 const FALLBACK_PLACES = [
-  { name: "Hoan Kiem Lake", lat: 21.0289, lon: 105.8522, category: "attraction" },
-  { name: "Temple of Literature", lat: 21.0294, lon: 105.8355, category: "attraction" },
-  { name: "St. Joseph's Cathedral", lat: 21.0287, lon: 105.8489, category: "attraction" },
-  { name: "Dong Xuan Market", lat: 21.0379, lon: 105.8509, category: "market" },
+  { name: 'Hoan Kiem Lake', lat: 21.0289, lon: 105.8522, category: 'attraction' },
+  { name: 'Temple of Literature', lat: 21.0294, lon: 105.8355, category: 'attraction' },
+  { name: "St. Joseph's Cathedral", lat: 21.0287, lon: 105.8489, category: 'attraction' },
+  { name: 'Dong Xuan Market', lat: 21.0379, lon: 105.8509, category: 'market' },
 ];
+
+function LocationField({ label, placeholder, confirm, search, error, className = '' }) {
+  const ref = useRef(null);
+  useClickAway(ref, search.closeResults);
+  const picked = !!search.selected;
+  const message = error || search.error;
+  return (
+    <div className={`field-group location-field ${className}`} ref={ref}>
+      <label>{label}</label>
+      <div className={`input-with-icon ${picked ? 'selected-location-input' : ''}`}>
+        <Icon name={picked ? 'mapPin' : 'search'} size={17} />
+        <input
+          value={search.query}
+          onChange={(e) => search.setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
+          placeholder={placeholder}
+          aria-label={label}
+          className={message && !picked ? 'input-error' : ''}
+        />
+        {picked && <span className="selected-check">✓</span>}
+      </div>
+      {search.results.length > 0 && (
+        <div className="search-results">
+          <span className="results-label">SEARCH RESULTS</span>
+          {search.results.map((r, i) => {
+            const [title, ...rest] = r.display_name.split(',');
+            return (
+              <button type="button" key={r.ref_id || i} onClick={() => search.select(r)}>
+                <span className="result-icon"><Icon name="mapPin" size={15} /></span>
+                <span><strong>{title}</strong>{rest.length > 0 && <small>{rest.join(',').trim()}</small>}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {picked && <small className="location-confirmation">{confirm}</small>}
+      {message && !picked && <small className="field-error">{message}</small>}
+    </div>
+  );
+}
 
 export default function Lobby() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const isHost = localStorage.getItem(`host_${id}`) === 'true';
+
   const [participants, setParticipants] = useState([]);
-  const [hasJoined, setHasJoined] = useState(false);
+  const [joinedAs, setJoinedAs] = useState(null); // { name, emoji } once this person has joined
   const [copied, setCopied] = useState(false);
-  
+
   const [name, setName] = useState('');
   const [emoji, setEmoji] = useState(EMOJIS[0]);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const [budget, setBudget] = useState(300);
-  const [preferences, setPreferences] = useState('');
-  const [transportMode, setTransportMode] = useState('car');
+  const [showEmojis, setShowEmojis] = useState(false);
+  const [budget, setBudget] = useState('300');
+  const [transportMode, setTransportMode] = useState('motorcycle');
+  const [picked, setPicked] = useState([]);
+  const [customList, setCustomList] = useState([]);
+  const [custom, setCustom] = useState('');
+  const [errors, setErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [selectedLocation, setSelectedLocation] = useState(null);
-
-  // Meetup mode (host only)
   const [meetupMode, setMeetupMode] = useState('independent');
-  const [meetupSearchQuery, setMeetupSearchQuery] = useState('');
-  const [meetupSearchResults, setMeetupSearchResults] = useState([]);
-  const [meetupLocation, setMeetupLocation] = useState(null);
-
-  // Generation status
+  const [meetupError, setMeetupError] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
-  const [generateStatus, setGenerateStatus] = useState('');
+  const [genStep, setGenStep] = useState(0);
+  const [genFailed, setGenFailed] = useState(false);
 
-  const isHost = localStorage.getItem(`host_${id}`) === 'true';
+  const start = useLocationSearch();
+  const meetup = useLocationSearch();
+  const emojiRef = useRef(null);
+  const inviteRef = useRef(null);
+  const closeEmojis = useCallback(() => setShowEmojis(false), []);
+  useClickAway(emojiRef, closeEmojis);
+
+  const hasJoined = !!joinedAs;
 
   const fetchParticipants = useCallback(async () => {
     const { data } = await supabase.from('trip_participants').select('*').eq('trip_id', id);
@@ -58,21 +105,18 @@ export default function Lobby() {
     const channel = supabase
       .channel(`lobby_${id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trip_participants', filter: `trip_id=eq.${id}` },
-        (payload) => { setParticipants(current => [...current, payload.new]); }
-      )
+        (payload) => setParticipants((cur) => (cur.some((p) => p.id === payload.new.id) ? cur : [...cur, payload.new])))
       .subscribe();
 
-    // Non-host: listen for trip_locations being created (means host generated the itinerary)
+    // Guests: the itinerary exists once trip_locations rows appear
     const tripGenChannel = supabase
       .channel(`trip_gen_${id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trip_locations', filter: `trip_id=eq.${id}` },
-        () => { navigate(`/timeline/${id}`); }
-      )
+        () => navigate(`/timeline/${id}`))
       .subscribe();
 
     const interval = setInterval(async () => {
       fetchParticipants();
-      // Fallback poll: check if locations exist yet (for non-realtime users)
       const { data } = await supabase.from('trip_locations').select('location_id').eq('trip_id', id).limit(1);
       if (data && data.length > 0) navigate(`/timeline/${id}`);
     }, 3000);
@@ -84,267 +128,332 @@ export default function Lobby() {
     };
   }, [id, fetchParticipants, navigate]);
 
-  const handleLocationSearch = async (query, setResults) => {
-    if (!query || query.trim().length < 2) return;
-    try {
-      const results = await searchAddress(query);
-      setResults(results); // [{display_name, ref_id}]
-    } catch (e) { console.error(e); }
-  };
+  const toggleActivity = (a) => setPicked((p) => (p.includes(a) ? p.filter((x) => x !== a) : [...p, a]));
 
-  const handleLocationSelect = async (result, setQuery, setLocation, setResults) => {
-    setQuery(result.display_name);
-    setResults([]);
-    const coords = await geocodeRef(result.ref_id);
-    if (coords) {
-      setLocation({ lat: coords.lat, lon: coords.lon, name: result.display_name });
-    } else {
-      alert('Could not resolve location coordinates. Please try another result.');
-    }
-  };
-
-
-  const handleSuggestionClick = (sug) => {
-    const current = preferences.split(',').map(s => s.trim()).filter(Boolean);
-    if (!current.includes(sug)) setPreferences(current.length > 0 ? `${preferences}, ${sug}` : sug);
+  const addCustom = () => {
+    const value = custom.trim();
+    if (!value) return;
+    const existing = [...ACTIVITIES, ...customList].find((a) => a.toLowerCase() === value.toLowerCase());
+    if (!existing) setCustomList((l) => [...l, value]);
+    const label = existing || value;
+    setPicked((p) => (p.includes(label) ? p : [...p, label]));
+    setCustom('');
   };
 
   const handleJoin = async (e) => {
     e.preventDefault();
-    if (!selectedLocation) { alert("Please search and select your starting location first!"); return; }
+    const activities = [...picked];
+    const pending = custom.trim();
+    if (pending && !activities.some((a) => a.toLowerCase() === pending.toLowerCase())) activities.push(pending);
+
+    const next = {};
+    if (!name.trim()) next.name = 'Please add your name to join.';
+    if (!start.selected) next.location = 'Pick a starting location from the results.';
+    if (!budget) next.budget = 'Enter a budget.';
+    if (activities.length === 0) next.activities = 'Pick at least one activity.';
+    setErrors(next);
+    if (Object.keys(next).length > 0) return;
+
     setIsSubmitting(true);
     try {
+      const cleanName = name.trim();
       await joinTrip(id, {
-        name, avatar_emoji: emoji,
-        budget: parseInt(budget) * 1000,
-        start_lat: selectedLocation.lat,
-        start_lon: selectedLocation.lon,
-        preferences: {
-          activities: preferences.split(',').map(p => p.trim()).filter(Boolean),
-          transportMode
-        }
+        name: cleanName,
+        avatar_emoji: emoji,
+        budget: parseInt(budget, 10) * 1000,
+        start_lat: start.selected.lat,
+        start_lon: start.selected.lon,
+        preferences: { activities, transportMode },
       });
-      // Persist identity so Timeline page knows who this user is
-      localStorage.setItem(`name_${id}`, name);
+      // Persist identity so the Timeline page knows who this user is
+      localStorage.setItem(`name_${id}`, cleanName);
       localStorage.setItem(`emoji_${id}`, emoji);
-      setHasJoined(true);
+      setJoinedAs({ name: cleanName, emoji });
       fetchParticipants();
     } catch (error) {
-      alert("Failed to join lobby."); console.error(error);
-    } finally { setIsSubmitting(false); }
+      console.error(error);
+      setErrors({ form: "Couldn't join the lobby. Check your connection and try again." });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleGenerate = async () => {
-    if (participants.length === 0) { alert("Wait for at least one person to join!"); return; }
-    if (meetupMode === 'meetup' && !meetupLocation) { alert("Please select a meetup location first."); return; }
-    
+    if (participants.length === 0) return;
+    if (meetupMode === 'meetup' && !meetup.selected) {
+      setMeetupError('Pick a meetup spot from the results first.');
+      return;
+    }
+    setMeetupError('');
+    setGenFailed(false);
+    setGenStep(0);
     setIsGenerating(true);
     try {
-      setGenerateStatus("🧠 Analysing your group's preferences...");
       const aiResult = await generateCompromiseItinerary(participants);
-      
-      setGenerateStatus(`🗺️ Searching for the best spots in ${aiResult.city}...`);
+
+      setGenStep(1);
       let places;
       try {
         const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 12000));
         places = await Promise.race([
           fetchLocationsFromOverpass(aiResult.city, aiResult.categories, aiResult.centroidLat, aiResult.centroidLon),
-          timeout
+          timeout,
         ]);
         if (!places || places.length === 0) places = FALLBACK_PLACES;
       } catch {
         places = FALLBACK_PLACES;
       }
 
-      setGenerateStatus("💾 Saving itinerary...");
+      setGenStep(2);
       await saveGeneratedItinerary(
         id,
         places.slice(0, 6),
         aiResult.city,
         meetupMode,
-        meetupMode === 'meetup' ? meetupLocation : null
+        meetupMode === 'meetup' ? meetup.selected : null,
       );
 
-      setGenerateStatus("✅ Itinerary ready! Launching...");
-      await new Promise(r => setTimeout(r, 800));
+      setGenStep(3);
+      await new Promise((r) => setTimeout(r, 800));
       navigate(`/timeline/${id}`);
     } catch (error) {
-      console.error("Generation failed:", error);
-      alert("Failed to generate itinerary. Please try again.");
+      console.error('Generation failed:', error);
+      setGenFailed(true);
     } finally {
       setIsGenerating(false);
-      setGenerateStatus('');
     }
   };
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(window.location.href);
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+    } catch {
+      inviteRef.current?.select();
+      document.execCommand('copy');
+    }
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => setCopied(false), 1800);
   };
 
-  return (
-    <div className="min-h-screen bg-gray-50 flex flex-col items-center py-10 px-4 font-sans text-gray-800">
-      <div className="w-full max-w-4xl bg-white rounded-xl shadow-xl overflow-hidden flex flex-col md:flex-row">
-        
-        {/* Left: Room */}
-        <div className="w-full md:w-1/2 p-8 bg-indigo-50 border-r border-indigo-100 flex flex-col">
-          <h1 className="text-3xl font-bold text-indigo-900 mb-2 flex items-center"><Users className="mr-3" /> Group Lobby</h1>
-          <p className="text-indigo-700 mb-6 text-sm">Waiting for friends to join and submit their preferences...</p>
-          <div className="grid grid-cols-3 gap-4 mb-8 flex-1 content-start">
-            {participants.map((p, idx) => (
-              <div key={idx} className="flex flex-col items-center">
-                <div className="w-16 h-16 bg-white rounded-full shadow flex items-center justify-center text-3xl mb-2 border-2 border-indigo-200">{p.avatar_emoji}</div>
-                <span className="font-bold text-sm text-indigo-900 truncate w-full text-center">{p.name}</span>
-                <span className="text-xs text-indigo-600 font-medium flex items-center justify-center">
-                  {p.preferences?.transportMode === 'driving' && <Car size={12} className="mr-1"/>}
-                  {p.preferences?.transportMode === 'cycling' && <Bike size={12} className="mr-1"/>}
-                  {p.preferences?.transportMode === 'walking' && <Footprints size={12} className="mr-1"/>}
-                  {(p.budget/1000).toFixed(0)}k
-                </span>
-              </div>
-            ))}
-            {participants.length === 0 && <div className="col-span-3 text-center text-indigo-400 py-10 italic">It's quiet here... invite some friends!</div>}
-          </div>
-          <button onClick={copyLink} className="flex items-center justify-center w-full bg-white border-2 border-indigo-200 text-indigo-600 font-bold py-3 rounded-lg hover:bg-indigo-100 transition">
-            {copied ? <Check size={20} className="mr-2" /> : <Copy size={20} className="mr-2" />}
-            {copied ? 'Link Copied!' : 'Copy Invite Link'}
-          </button>
-        </div>
+  const isMe = (p) => joinedAs && p.name === joinedAs.name && p.avatar_emoji === joinedAs.emoji;
+  const showGenerating = hasJoined && isGenerating;
+  const showError = hasJoined && !isGenerating && genFailed;
+  const showHost = hasJoined && isHost && !isGenerating && !genFailed;
+  const showWaiting = hasJoined && !isHost;
+  const inviteText = `${window.location.host}${window.location.pathname}`;
 
-        {/* Right: Form or Controls */}
-        <div className="w-full md:w-1/2 p-8 overflow-y-auto max-h-screen">
-          {!hasJoined ? (
-            <form onSubmit={handleJoin} className="space-y-5">
-              <h2 className="text-2xl font-bold text-gray-800">Join the Trip</h2>
-              
-              {/* Name + Avatar */}
-              <div className="flex items-center space-x-3">
-                <div className="relative">
-                  <button type="button" onClick={() => setShowEmojiPicker(!showEmojiPicker)} className="w-12 h-12 text-2xl bg-gray-100 border border-gray-300 rounded-lg hover:bg-gray-200 flex items-center justify-center shadow-sm">{emoji}</button>
-                  {showEmojiPicker && (
-                    <div className="absolute top-14 left-0 bg-white border shadow-xl rounded-lg p-2 grid grid-cols-5 gap-1 z-30 w-max">
-                      {EMOJIS.map(em => (
-                        <button key={em} type="button" onClick={() => { setEmoji(em); setShowEmojiPicker(false); }} className="text-2xl p-2 hover:bg-indigo-50 rounded">{em}</button>
+  return (
+    <main className="lobby-page">
+      <section className="lobby-card">
+        <aside className="people-panel">
+          <div>
+            <span className="overline">GROUP LOBBY</span>
+            <h2>Waiting for friends</h2>
+            <p>Share the link to invite them</p>
+          </div>
+
+          <div className="participant-list">
+            <div className="list-heading"><span>WHO'S IN</span><b>{participants.length}</b></div>
+            {participants.length === 0 ? (
+              <div className="empty-state">No one here yet</div>
+            ) : (
+              participants.map((p, i) => (
+                <div className="participant" key={p.id ?? i}>
+                  <span className="avatar">{p.avatar_emoji}</span>
+                  <span className="participant-name">
+                    <strong>{p.name}</strong>
+                    {isMe(p) && isHost && <small>HOST</small>}
+                    {isMe(p) && <small className="you-tag">You</small>}
+                  </span>
+                  <span className="budget-chip">{Math.round(p.budget / 1000)}k VND</span>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="invite-block">
+            <label>INVITE LINK</label>
+            <div className="invite-field">
+              <Icon name="link" size={16} />
+              <input ref={inviteRef} readOnly value={inviteText} aria-label="Invite link" />
+              <button type="button" className={copied ? 'copied' : ''} onClick={copyLink}>
+                <Icon name="copy" size={14} />{copied ? 'Copied' : 'Copy link'}
+              </button>
+            </div>
+            <small>Anyone with this link can join your trip.</small>
+          </div>
+        </aside>
+
+        <section className="form-panel">
+          {!hasJoined && (
+            <form className="form-content" onSubmit={handleJoin} noValidate>
+              <div className="form-heading">
+                <span className="step-label">01 · YOUR DETAILS</span>
+                <h2>Join the trip</h2>
+                <p>Tell the group a little about your day.</p>
+              </div>
+
+              <div className="field-group">
+                <label>Your name</label>
+                <div className="name-row">
+                  <div className={`emoji-picker ${showEmojis ? 'force-open' : ''}`} ref={emojiRef}>
+                    <button type="button" className="emoji-current" aria-label="Choose avatar" onClick={() => setShowEmojis((s) => !s)}>{emoji}</button>
+                    <div className="emoji-menu">
+                      {EMOJIS.map((item) => (
+                        <button type="button" key={item} onClick={() => { setEmoji(item); setShowEmojis(false); }}>{item}</button>
                       ))}
                     </div>
-                  )}
+                  </div>
+                  <div className="name-input-wrap">
+                    <input
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      className={errors.name ? 'input-error' : ''}
+                      placeholder="What should we call you?"
+                      aria-label="Your name"
+                      maxLength={30}
+                    />
+                    {errors.name && <small className="field-error">{errors.name}</small>}
+                  </div>
                 </div>
-                <input required type="text" value={name} onChange={e => setName(e.target.value)} className="flex-1 border p-3 rounded-lg focus:ring-2 focus:ring-indigo-400 focus:outline-none shadow-sm" placeholder="Your Name (e.g. Alex)" />
               </div>
 
-              {/* Starting Location */}
-              <div className="relative">
-                <label className="block text-sm font-bold text-gray-700 mb-1">Starting Location</label>
-                <div className="flex">
-                  <input type="text" value={searchQuery}
-                    onChange={e => { setSearchQuery(e.target.value); setSelectedLocation(null); }}
-                    onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), handleLocationSearch(searchQuery, setSearchResults))}
-                    placeholder="Where are you starting from?"
-                    className={`flex-1 border p-3 text-sm rounded-l-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 ${selectedLocation ? 'border-green-400 bg-green-50' : 'border-gray-300'}`}
-                  />
-                  <button type="button" onClick={() => handleLocationSearch(searchQuery, setSearchResults)} className="bg-indigo-100 text-indigo-700 px-4 rounded-r-lg hover:bg-indigo-200 border border-l-0 border-indigo-200"><Search size={18} /></button>
+              <LocationField
+                label="Starting location"
+                placeholder="Search a place or neighborhood"
+                confirm="We'll plan from this starting point."
+                search={start}
+                error={errors.location}
+              />
+
+              <div className="form-row">
+                <div className="field-group travel-field">
+                  <label>Travel mode</label>
+                  <div className="segmented-control">
+                    {MODES.map(([value, label, icon]) => (
+                      <button type="button" key={value} className={transportMode === value ? 'active' : ''} onClick={() => setTransportMode(value)}>
+                        <Icon name={icon} size={16} />{label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                {searchResults.length > 0 && (
-                  <ul className="absolute z-20 w-full bg-white border mt-1 max-h-40 overflow-y-auto shadow-xl rounded-lg">
-                    {searchResults.map((r, i) => <li key={i} onClick={() => handleLocationSelect(r, setSearchQuery, setSelectedLocation, setSearchResults)} className="p-3 border-b hover:bg-indigo-50 cursor-pointer text-sm flex items-start"><MapPin size={14} className="mr-2 mt-0.5 text-gray-400 flex-shrink-0"/>{r.display_name}</li>)}
-                  </ul>
-                )}
+                <div className="field-group budget-field">
+                  <label>Budget per person</label>
+                  <div className="suffix-input">
+                    <input
+                      value={budget}
+                      onChange={(e) => setBudget(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      inputMode="numeric"
+                      aria-label="Budget per person"
+                      className={errors.budget ? 'input-error' : ''}
+                    />
+                    <span>k VND</span>
+                  </div>
+                  {errors.budget && <small className="field-error">{errors.budget}</small>}
+                </div>
               </div>
 
-              {/* Transport Mode */}
-              <div>
-                <label className="block text-sm font-bold text-gray-700 mb-2">How will you travel?</label>
-                <div className="flex space-x-2">
-                  {[['car', Car, '🚗 Car'], ['motorcycle', Bike, '🛵 Motorbike'], ['foot', Footprints, '🚶 Walk']].map(([mode, Icon, label]) => (
-                    <button key={mode} type="button" onClick={() => setTransportMode(mode)} className={`flex-1 flex flex-col items-center py-2 rounded-lg border transition ${transportMode === mode ? 'bg-indigo-50 border-indigo-400 text-indigo-700 shadow-sm' : 'bg-white hover:bg-gray-50'}`}>
-                      <Icon size={20} className="mb-1"/><span className="text-xs font-medium">{label}</span>
-                    </button>
+              <div className="field-group">
+                <label>What are you in the mood for?</label>
+                <div className="activity-chips">
+                  {[...ACTIVITIES, ...customList].map((a) => (
+                    <button type="button" key={a} className={picked.includes(a) ? 'active' : ''} onClick={() => toggleActivity(a)}>{a}</button>
                   ))}
+                  <input
+                    aria-label="Custom activity"
+                    placeholder="+ Add your own"
+                    value={custom}
+                    maxLength={24}
+                    onChange={(e) => setCustom(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCustom(); } }}
+                  />
                 </div>
+                {errors.activities && <small className="field-error">{errors.activities}</small>}
               </div>
 
-              {/* Budget + Activities */}
-              <div className="flex space-x-3">
-                <div className="w-1/3">
-                  <label className="block text-sm font-bold text-gray-700 mb-1">Budget (k VND)</label>
-                  <div className="relative">
-                    <input required type="number" step="1" min="0" value={budget} onChange={e => setBudget(e.target.value)} className="w-full border p-3 pr-12 rounded-lg focus:ring-2 focus:ring-indigo-400 focus:outline-none shadow-sm" />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">k VND</span>
-                  </div>
-                </div>
-                <div className="flex-1">
-                  <label className="block text-sm font-bold text-gray-700 mb-1">Activities / Vibes</label>
-                  <input required type="text" value={preferences} onChange={e => setPreferences(e.target.value)} className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-indigo-400 focus:outline-none shadow-sm text-sm" placeholder="e.g. cafe, museum" />
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {SUGGESTIONS.map(sug => <button key={sug} type="button" onClick={() => handleSuggestionClick(sug)} className="text-xs bg-gray-100 hover:bg-indigo-100 hover:text-indigo-700 text-gray-600 px-3 py-1.5 rounded-full transition font-medium">+ {sug}</button>)}
-              </div>
-
-              <button disabled={isSubmitting} type="submit" className="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl hover:bg-indigo-700 disabled:opacity-50 shadow-lg">
-                {isSubmitting ? 'Joining...' : 'Jump In!'}
-              </button>
+              {errors.form && <small className="field-error">{errors.form}</small>}
+              <button className="primary-button" disabled={isSubmitting}>{isSubmitting ? 'Joining…' : 'Join'}</button>
             </form>
-          ) : (
-            <div className="space-y-6">
-              <div className="text-center">
-                <div className="text-6xl mb-3">🎉</div>
-                <h2 className="text-2xl font-bold text-gray-800 mb-1">You're in!</h2>
-                <p className="text-gray-500 text-sm">{participants.length} participant{participants.length !== 1 ? 's' : ''} in the lobby</p>
-              </div>
-              
-              {isHost && (
-                <div className="space-y-4 border-t pt-5">
-                  <h3 className="font-bold text-gray-700">Host Controls</h3>
+          )}
 
-                  {/* Meetup Mode */}
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-2">How does the group meet up?</label>
-                    <div className="flex space-x-2">
-                      <button type="button" onClick={() => setMeetupMode('independent')} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition ${meetupMode === 'independent' ? 'bg-indigo-50 border-indigo-400 text-indigo-700' : 'bg-white hover:bg-gray-50'}`}>
-                        🏃 Each to Dest #1
-                      </button>
-                      <button type="button" onClick={() => setMeetupMode('meetup')} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition ${meetupMode === 'meetup' ? 'bg-indigo-50 border-indigo-400 text-indigo-700' : 'bg-white hover:bg-gray-50'}`}>
-                        ⭐ Pick Meetup Spot
-                      </button>
-                    </div>
-                  </div>
-
-                  {meetupMode === 'meetup' && (
-                    <div className="relative">
-                      <label className="block text-sm font-bold text-gray-700 mb-1">Meetup Location</label>
-                      <div className="flex">
-                        <input type="text" value={meetupSearchQuery}
-                          onChange={e => { setMeetupSearchQuery(e.target.value); setMeetupLocation(null); }}
-                          onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), handleLocationSearch(meetupSearchQuery, setMeetupSearchResults))}
-                          placeholder="Search for a central meetup spot..."
-                          className={`flex-1 border p-3 text-sm rounded-l-lg focus:outline-none ${meetupLocation ? 'border-green-400 bg-green-50' : 'border-gray-300'}`}
-                        />
-                        <button type="button" onClick={() => handleLocationSearch(meetupSearchQuery, setMeetupSearchResults)} className="bg-indigo-100 text-indigo-700 px-4 rounded-r-lg hover:bg-indigo-200 border border-l-0 border-indigo-200"><Search size={18}/></button>
-                      </div>
-                      {meetupSearchResults.length > 0 && (
-                        <ul className="absolute z-20 w-full bg-white border mt-1 max-h-40 overflow-y-auto shadow-xl rounded-lg">
-                          {meetupSearchResults.map((r, i) => <li key={i} onClick={() => handleLocationSelect(r, setMeetupSearchQuery, setMeetupLocation, setMeetupSearchResults)} className="p-3 border-b hover:bg-indigo-50 cursor-pointer text-sm">{r.display_name}</li>)}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Generate Button */}
-                  <button onClick={handleGenerate} disabled={isGenerating} className="w-full bg-green-600 text-white font-bold py-4 rounded-xl hover:bg-green-700 disabled:opacity-60 flex items-center justify-center text-base shadow-lg transition">
-                    {isGenerating ? <><Loader2 className="animate-spin mr-3" size={22}/>{generateStatus}</> : <><Play className="mr-2" size={22}/> Generate Compromise Trip</>}
-                  </button>
-                </div>
-              )}
-              
-              {!isHost && (
-                <p className="text-center text-gray-500 text-sm italic">Waiting for the host to generate the itinerary...</p>
-              )}
+          {showWaiting && (
+            <div className="status-content">
+              <span className="status-emoji">{joinedAs.emoji}</span>
+              <span className="overline">YOU'RE IN</span>
+              <h2>You're in</h2>
+              <p className="status-count">{participants.length} {participants.length === 1 ? 'traveler' : 'travelers'} in the lobby</p>
+              <div className="waiting-note">Waiting for the host to generate the itinerary<span className="dots"><i></i><i></i><i></i></span></div>
             </div>
           )}
-        </div>
-      </div>
-    </div>
+
+          {showHost && (
+            <div className="form-content host-content">
+              <div className="form-heading">
+                <span className="step-label">HOST CONTROLS</span>
+                <h2>Ready to make a day of it?</h2>
+                <p>Choose how the group should begin.</p>
+              </div>
+              <div className="host-summary">
+                <div>{participants.slice(0, 4).map((p, i) => <span key={p.id ?? i}>{p.avatar_emoji}</span>)}</div>
+                <p><strong>{participants.length} {participants.length === 1 ? 'traveler' : 'travelers'}</strong><br />Preferences are ready to match.</p>
+              </div>
+              <div className="field-group">
+                <label>Where should everyone begin?</label>
+                <div className="meetup-control">
+                  <button type="button" className={meetupMode === 'independent' ? 'active' : ''} onClick={() => { setMeetupMode('independent'); setMeetupError(''); }}>
+                    <span className="radio"></span><span><strong>Everyone goes to stop 1</strong><small>Start at the first place on the route</small></span>
+                  </button>
+                  <button type="button" className={meetupMode === 'meetup' ? 'active' : ''} onClick={() => setMeetupMode('meetup')}>
+                    <span className="radio"></span><span><strong>Pick a meetup spot</strong><small>Gather first, then start the itinerary</small></span>
+                  </button>
+                </div>
+              </div>
+              {meetupMode === 'meetup' && (
+                <LocationField
+                  className="meetup-search"
+                  label="Meetup location"
+                  placeholder="Search for a meetup spot"
+                  confirm="Everyone will gather here first."
+                  search={meetup}
+                  error={meetupError}
+                />
+              )}
+              <button className="primary-button" onClick={handleGenerate}>Generate trip</button>
+            </div>
+          )}
+
+          {showGenerating && (
+            <div className="status-content generating-content">
+              <span className="route-loader"><Icon name="route" size={28} /></span>
+              <span className="overline">BUILDING YOUR DAY</span>
+              <h2>Finding your best route</h2>
+              <p>Analysing your group's preferences<span className="dots"><i></i><i></i><i></i></span></p>
+              <div className="analysis-list">
+                {STEPS.map((label, i) => (
+                  i < genStep
+                    ? <span key={label} className="done">✓ <b>{label}</b></span>
+                    : i === genStep
+                      ? <span key={label} className="active"><i className="mini-spinner"></i><b>{label}</b></span>
+                      : <span key={label}>○ <b>{label}</b></span>
+                ))}
+              </div>
+              <button className="primary-button loading-button" disabled><i className="spinner"></i>Generating trip</button>
+            </div>
+          )}
+
+          {showError && (
+            <div className="status-content error-content">
+              <span className="error-mark">!</span>
+              <span className="overline">SOMETHING WENT WRONG</span>
+              <h2>We couldn't build the trip</h2>
+              <p>Nothing was lost. Check your connection and try generating the itinerary again.</p>
+              <button className="primary-button retry-button" onClick={handleGenerate}>Try again</button>
+            </div>
+          )}
+        </section>
+      </section>
+
+      <footer className="page-footer"><span>Private by default</span><i></i><span>Links expire after your trip</span></footer>
+    </main>
   );
 }

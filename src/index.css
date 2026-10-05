@@ -1,3 +1,4 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap");
 @import "tailwindcss";
 
 @layer utilities {
@@ -6,4 +7,39 @@
     width: 100%;
     z-index: 10;
   }
+}
+
+:root {
+  --cream: #f5f0e7;
+  --paper: #fffdf9;
+  --paper-strong: #ffffff;
+  --violet: #5b19ff;
+  --violet-deep: #3f08bd;
+  --violet-wash: #f0ebff;
+  --ink: #241a38;
+  --muted: #625a6e;
+  --line: #ded7ce;
+  --line-violet: #d6c8ff;
+  --success: #237b55;
+}
+
+html, body, #root { min-width: 100%; min-height: 100%; margin: 0; }
+body { font-family: "DM Sans", sans-serif; color: var(--ink); background: var(--cream); }
+
+/* Shared app layout: top bar + scrollable content area */
+.app-frame { height: 100dvh; display: flex; flex-direction: column; background: var(--cream); }
+.app-content { flex: 1; min-height: 0; overflow: auto; }
+.topbar { height: 74px; padding: 0 44px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid rgba(36, 26, 56, .1); background: var(--cream); }
+.wordmark { display: flex; align-items: center; gap: 11px; font-family: "Manrope"; font-size: 20px; letter-spacing: -.04em; }
+.wordmark-icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; color: white; background: var(--violet); box-shadow: 0 7px 16px rgba(91, 25, 255, .19); }
+.wordmark b, .wordmark i { font-style: normal; font-weight: 800; }
+.wordmark i { color: var(--violet); }
+.topbar-tagline { text-align: right; line-height: 1.35; }
+.topbar-tagline strong { display: block; font-family: "Manrope"; font-size: 15px; letter-spacing: -.02em; }
+.topbar-tagline span { color: var(--muted); font-size: 12px; }
+@media (max-width: 900px) { .topbar { padding: 0 20px; } .topbar-tagline span { display: none; } }
+@media (max-width: 520px) { .topbar-tagline { display: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }

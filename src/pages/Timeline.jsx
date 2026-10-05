@@ -247,13 +247,13 @@ export default function Timeline() {
   const TransportIcon = transportIcon;
 
   if (!trip) return (
-    <div className="h-screen flex items-center justify-center text-gray-500">
+    <div className="h-full flex items-center justify-center text-gray-500">
       <Loader2 className="animate-spin mr-2" /> Loading itinerary...
     </div>
   );
 
   return (
-    <div className="flex h-screen font-sans text-gray-800">
+    <div className="flex h-full font-sans text-gray-800">
       {/* Sidebar */}
       <div className="w-1/3 min-w-[340px] max-w-[420px] h-full flex flex-col bg-white border-r shadow-lg z-10">
         {/* Header */}

@@ -58,7 +58,7 @@ function addRouteLayer(map) {
       type: 'line',
       source: 'route',
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': '#4f46e5', 'line-width': 5, 'line-opacity': 0.8 }
+      paint: { 'line-color': '#5b19ff', 'line-width': 5, 'line-opacity': 0.8 }
     });
   }
 }
@@ -97,7 +97,7 @@ export default function CustomMapContainer({ locations, routeGeometry }) {
       if (!loc.lat || !loc.lon) return;
 
       const el = document.createElement('div');
-      el.style.cssText = 'width:28px;height:28px;background:#4f46e5;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:13px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);cursor:pointer;';
+      el.style.cssText = 'width:28px;height:28px;background:#5b19ff;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:13px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);cursor:pointer;';
       el.textContent = (index + 1).toString();
 
       const popup = new Popup({ offset: 25 })
@@ -196,7 +196,7 @@ export default function CustomMapContainer({ locations, routeGeometry }) {
             onClick={() => setCurrentStyle(code)}
             className={`px-3 py-1.5 text-xs font-medium transition-colors ${
               currentStyle === code
-                ? 'bg-indigo-600 text-white'
+                ? 'bg-[#5b19ff] text-white'
                 : 'text-gray-600 hover:bg-gray-100'
             }`}
           >
