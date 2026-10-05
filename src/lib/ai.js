@@ -4,8 +4,8 @@ import { reverseGeocodeRaw } from './vietmap';
 // ─── Model constants ───────────────────────────────────────────────────────────
 // Override either via .env.local to swap models without touching code.
 // gemini-3.8-flash is a thinking model; response.text auto-skips thought parts.
-const GEMINI_MODEL          = import.meta.env.VITE_GEMINI_MODEL          || 'gemini-3.8-flash';
-const GEMINI_FALLBACK_MODEL = import.meta.env.VITE_GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash';
+const GEMINI_MODEL = 'gemini-3.8-flash';
+const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash';
 
 const ai = new GoogleGenAI({
   apiKey: import.meta.env.VITE_GEMINI_API_KEY
