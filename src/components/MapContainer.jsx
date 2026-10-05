@@ -1,11 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import vietmapgl from '@vietmap/vietmap-gl-js/dist/vietmap-gl';
 import '@vietmap/vietmap-gl-js/dist/vietmap-gl.css';
 import { TILE_KEY } from '../lib/vietmap';
 
 const { Map: VietmapMap, NavigationControl, Popup, Marker, LngLatBounds } = vietmapgl;
 
-// Vietmap built-in styles — all served from Vietmap CDN with Tilemap key
+// ─── Constants ────────────────────────────────────────────────────────────────
+const INITIAL_STYLE = 'tm';
+
 const MAP_STYLES = {
   Street:    'tm',   // Default Vietnam street map
   Light:     'lm',   // Light / clean
@@ -13,114 +15,174 @@ const MAP_STYLES = {
   Satellite: 'hm',   // Hybrid (satellite + labels)
 };
 
+const DEFAULT_CENTER = [105.8542, 21.0285]; // Hanoi [lon, lat]
+
+// ─── Module-level helpers ─────────────────────────────────────────────────────
+
 function styleUrl(code) {
   return `https://maps.vietmap.vn/maps/styles/${code}/style.json?apikey=${TILE_KEY}`;
 }
 
-export default function CustomMapContainer({ locations, routeGeometry }) {
-  const mapContainer = useRef(null);
-  const mapRef = useRef(null);
-  const markersRef = useRef([]);
-  const [currentStyle, setCurrentStyle] = useState('tm');
+/** Escape user text before inserting into popup HTML. */
+function esc(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
-  const defaultCenter = [105.8542, 21.0285]; // Hanoi [lon, lat]
-
-  // Initialize Map once
-  useEffect(() => {
-    if (mapRef.current) return;
-
-    const initialCenter = locations.length > 0
-      ? [locations[0].lon, locations[0].lat]
-      : defaultCenter;
-
-    mapRef.current = new VietmapMap({
-      container: mapContainer.current,
-      style: styleUrl(currentStyle),
-      center: initialCenter,
-      zoom: 13,
-    });
-
-    mapRef.current.addControl(new NavigationControl(), 'bottom-right');
-
-    mapRef.current.on('load', () => {
-      mapRef.current.addSource('route', {
-        type: 'geojson',
-        data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }
-      });
-      mapRef.current.addLayer({
-        id: 'route-layer',
-        type: 'line',
-        source: 'route',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#4f46e5', 'line-width': 5, 'line-opacity': 0.8 }
-      });
-      updateMapData();
-    });
-
-    return () => { mapRef.current?.remove(); mapRef.current = null; };
-  }, []);
-
-  // Swap style when user clicks a button
-  useEffect(() => {
-    if (!mapRef.current) return;
-    mapRef.current.setStyle(styleUrl(currentStyle));
-    mapRef.current.once('style.load', () => {
-      if (!mapRef.current.getSource('route')) {
-        mapRef.current.addSource('route', {
-          type: 'geojson',
-          data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: routeGeometry || [] } }
-        });
-        mapRef.current.addLayer({
-          id: 'route-layer', type: 'line', source: 'route',
-          layout: { 'line-join': 'round', 'line-cap': 'round' },
-          paint: { 'line-color': '#4f46e5', 'line-width': 5, 'line-opacity': 0.8 }
-        });
+/**
+ * Add the route GeoJSON source if it does not already exist.
+ * @param {object} map - The VietmapMap instance.
+ * @param {Array}  coordinates - Initial coordinate array (lon, lat pairs).
+ */
+function addRouteSource(map, coordinates = []) {
+  if (!map.getSource('route')) {
+    map.addSource('route', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        properties: {},
+        geometry: { type: 'LineString', coordinates }
       }
-      updateMapData();
     });
-  }, [currentStyle]);
+  }
+}
 
-  const updateMapData = () => {
-    if (!mapRef.current?.isStyleLoaded()) return;
+/** Add the route line layer if it does not already exist. */
+function addRouteLayer(map) {
+  if (!map.getLayer('route-layer')) {
+    map.addLayer({
+      id: 'route-layer',
+      type: 'line',
+      source: 'route',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#4f46e5', 'line-width': 5, 'line-opacity': 0.8 }
+    });
+  }
+}
 
-    markersRef.current.forEach(m => m.remove());
+// ─── Component ────────────────────────────────────────────────────────────────
+
+export default function CustomMapContainer({ locations, routeGeometry }) {
+  const mapContainer  = useRef(null);
+  const mapRef        = useRef(null);
+  const markersRef    = useRef([]);
+  const propsRef      = useRef({ locations, routeGeometry });
+  const appliedStyleRef = useRef(INITIAL_STYLE); // tracks what style the map is currently showing
+
+  const [currentStyle, setCurrentStyle] = useState(INITIAL_STYLE);
+
+  // ── Effect 1: keep propsRef in sync (declared first, runs before all others) ──
+  useEffect(() => {
+    propsRef.current = { locations, routeGeometry };
+  }); // intentionally no dep array — runs after every render
+
+  // ── updateMapData: stable identity, reads latest props from propsRef ──────────
+  const updateMapData = useCallback(({ force = false } = {}) => {
+    const m = mapRef.current;
+    if (!force && !m?.isStyleLoaded()) return;
+
+    const { locations: locs, routeGeometry: rg } = propsRef.current;
+
+    // Remove old markers
+    markersRef.current.forEach(mk => mk.remove());
     markersRef.current = [];
 
     const bounds = new LngLatBounds();
     let hasPoints = false;
 
-    locations.forEach((loc, index) => {
+    locs.forEach((loc, index) => {
       if (!loc.lat || !loc.lon) return;
+
       const el = document.createElement('div');
       el.style.cssText = 'width:28px;height:28px;background:#4f46e5;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:13px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);cursor:pointer;';
       el.textContent = (index + 1).toString();
 
       const popup = new Popup({ offset: 25 })
-        .setHTML(`<b>${index + 1}.</b> ${loc.displayName || loc.name}`);
+        .setHTML(`<b>${index + 1}.</b> ${esc(loc.displayName || loc.name)}`);
 
       const marker = new Marker({ element: el })
         .setLngLat([loc.lon, loc.lat])
         .setPopup(popup)
-        .addTo(mapRef.current);
+        .addTo(m);
 
       markersRef.current.push(marker);
       bounds.extend([loc.lon, loc.lat]);
       hasPoints = true;
     });
 
-    const src = mapRef.current.getSource('route');
+    const src = m.getSource('route');
     if (src) {
-      const coords = routeGeometry || [];
+      const coords = rg?.coordinates || [];
       src.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
       coords.forEach(c => { bounds.extend(c); hasPoints = true; });
     }
 
     if (hasPoints) {
-      mapRef.current.fitBounds(bounds, { padding: 50, duration: 800 });
+      m.fitBounds(bounds, { padding: 50, duration: 800 });
     }
-  };
+  }, []); // stable — all prop reads go through propsRef
 
-  useEffect(() => { updateMapData(); }, [locations, routeGeometry]);
+  // ── Effect 2: create map once ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (mapRef.current) return;
+
+    const { locations: locs } = propsRef.current;
+    const initialCenter = locs.length > 0
+      ? [locs[0].lon, locs[0].lat]
+      : DEFAULT_CENTER;
+
+    mapRef.current = new VietmapMap({
+      container: mapContainer.current,
+      style: styleUrl(INITIAL_STYLE),
+      center: initialCenter,
+      zoom: 13,
+    });
+
+    mapRef.current.addControl(new NavigationControl(), 'bottom-right');
+
+    // Add sources/layers once the initial style is loaded, then paint current data.
+    // The style-switch effect skips on mount (appliedStyleRef already equals INITIAL_STYLE),
+    // so this 'load' handler is the only place that bootstraps sources on first load.
+    mapRef.current.on('load', () => {
+      addRouteSource(mapRef.current);
+      addRouteLayer(mapRef.current);
+      updateMapData({ force: true });
+    });
+
+    return () => { mapRef.current?.remove(); mapRef.current = null; };
+  }, [updateMapData]); // updateMapData is useCallback([]) — identity never changes
+
+  // ── Effect 3: style switching ─────────────────────────────────────────────────
+  useEffect(() => {
+    const m = mapRef.current;
+    if (!m) return;
+    // Skip if the map already shows this style (prevents double-init on mount).
+    if (appliedStyleRef.current === currentStyle) return;
+    appliedStyleRef.current = currentStyle;
+
+    // { diff: false } silences "Unable to perform style diff" console warnings.
+    m.setStyle(styleUrl(currentStyle), { diff: false });
+
+    // Named function so we can remove it in cleanup (prevents listener leak on
+    // rapid style switches before the previous style.load fires).
+    function onStyleLoad() {
+      const { routeGeometry: rg } = propsRef.current;
+      // Pass current coordinates so the route is visible immediately after a style change,
+      // without waiting for the next data-effect run.
+      addRouteSource(m, rg?.coordinates || []);
+      addRouteLayer(m);
+      updateMapData({ force: true });
+    }
+
+    m.on('style.load', onStyleLoad);
+    return () => m.off('style.load', onStyleLoad);
+  }, [currentStyle, updateMapData]);
+
+  // ── Effect 4: repaint when data changes ───────────────────────────────────────
+  useEffect(() => { updateMapData(); }, [locations, routeGeometry, updateMapData]);
 
   return (
     <div className="relative w-full h-full min-h-[400px]" style={{ minHeight: '100%' }}>

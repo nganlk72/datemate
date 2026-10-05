@@ -18,7 +18,7 @@ CREATE TABLE trips (
 --    place_key = "lat,lon" string — stable dedup key, provider-agnostic
 CREATE TABLE locations (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  place_key TEXT UNIQUE,           -- replaces osm_id; format: "21.0289,105.8522"
+  place_key TEXT UNIQUE,           -- format: "21.0289,105.8522"
   name TEXT,
   lat DOUBLE PRECISION,
   lon DOUBLE PRECISION,
@@ -72,7 +72,7 @@ CREATE TABLE location_reviews (
 );
 
 -- ─── MIGRATION (if you already have the old schema) ───────────────────────────
--- ALTER TABLE locations DROP COLUMN IF EXISTS osm_id;
+
 -- ALTER TABLE locations ADD COLUMN IF NOT EXISTS place_key TEXT UNIQUE;
 -- ALTER TABLE trips ADD COLUMN IF NOT EXISTS meetup_mode TEXT DEFAULT 'independent';
 -- ALTER TABLE trips ADD COLUMN IF NOT EXISTS meetup_lat DOUBLE PRECISION;

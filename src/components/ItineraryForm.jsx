@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import axios from 'axios';
-import { MapPin, Search, Plus, Trash2, Navigation } from 'lucide-react';
+import { Search, Trash2, Navigation } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 
 import { searchAddress, geocodeRef } from '../lib/vietmap';
@@ -11,7 +10,9 @@ export default function ItineraryForm({
   travelMode, 
   setTravelMode,
   onCalculateRoute,
-  isCalculating
+  isCalculating,
+  checkDuplicate,
+  setDuplicateMsg
 }) {
   const [searchInput, setSearchInput] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -37,11 +38,20 @@ export default function ItineraryForm({
       const details = await geocodeRef(result.ref_id);
       if (details) {
         const newLocation = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           displayName: details.display_name,
           lat: parseFloat(details.lat),
           lon: parseFloat(details.lon)
         };
+        
+        if (checkDuplicate && checkDuplicate(newLocation, locations)) {
+          if (setDuplicateMsg) {
+            setDuplicateMsg("This place is already in your list");
+            setTimeout(() => setDuplicateMsg(''), 3000);
+          }
+          return;
+        }
+
         setLocations([...locations, newLocation]);
         setSearchInput('');
         setSearchResults([]);

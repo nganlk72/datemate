@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { X, Star, MessageSquare, Tag, Send, Image as ImageIcon, Loader2, ZoomIn, ZoomOut } from 'lucide-react';
 import { fetchLocationReviews, submitLocationReview } from '../lib/db';
 import { supabase } from '../lib/supabase';
@@ -21,18 +21,20 @@ export default function LocationInsights({ location, myName, onClose }) {
   const [lightboxImage, setLightboxImage] = useState(null);
   const [zoomLevel, setZoomLevel] = useState(1);
 
-  useEffect(() => {
-    if (location?.id) {
-      loadReviews();
-    }
-  }, [location]);
+  const locationId = location?.id;
 
-  const loadReviews = async () => {
+  const loadReviews = useCallback(async () => {
     setIsLoading(true);
-    const data = await fetchLocationReviews(location.id);
+    const data = await fetchLocationReviews(locationId);
     setReviews(data);
     setIsLoading(false);
-  };
+  }, [locationId]);
+
+  useEffect(() => {
+    if (locationId) {
+      loadReviews();
+    }
+  }, [locationId, loadReviews]);
 
   const toggleTag = (tag) => {
     if (selectedTags.includes(tag)) {
@@ -73,7 +75,7 @@ export default function LocationInsights({ location, myName, onClose }) {
         const fileExt = file.name.split('.').pop();
         const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
         
-        const { data, error } = await supabase.storage
+        const { error } = await supabase.storage
           .from('reviews')
           .upload(fileName, file);
           

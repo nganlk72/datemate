@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import ItineraryForm from '../components/ItineraryForm';
 import MapContainer from '../components/MapContainer';
@@ -20,18 +19,45 @@ export default function Planner() {
   const [isSaving, setIsSaving] = useState(false);
   const [isAutoMode, setIsAutoMode] = useState(true);
 
+  const [duplicateMsg, setDuplicateMsg] = useState('');
+
+  const checkDuplicate = (newLoc, list) => {
+    return list.some(loc => {
+      const sameCoords = Number(loc.lat).toFixed(5) === Number(newLoc.lat).toFixed(5) && 
+                         Number(loc.lon).toFixed(5) === Number(newLoc.lon).toFixed(5);
+      const latDiff = Math.abs(Number(loc.lat) - Number(newLoc.lat));
+      const lonDiff = Math.abs(Number(loc.lon) - Number(newLoc.lon));
+      const isWithin20m = latDiff < 0.0002 && lonDiff < 0.0002;
+      const sameName = (loc.name || loc.displayName || '').toLowerCase() === (newLoc.name || newLoc.displayName || '').toLowerCase();
+      return sameCoords || (sameName && isWithin20m);
+    });
+  };
+
   const handleLocationsDiscovered = (discoveredPlaces, params) => {
-    const mappedLocations = discoveredPlaces.map((place) => ({
-      id: place.osm_id.toString(),
-      osm_id: place.osm_id,
-      name: place.name,
-      displayName: place.name,
-      lat: place.lat,
-      lon: place.lon,
-      category: place.category
-    }));
+    const uniqueLocations = [];
+    let hadDuplicates = false;
+
+    discoveredPlaces.forEach((place, index) => {
+      const newLoc = {
+        id: `${place.lat},${place.lon}-${index}`,
+        name: place.name,
+        displayName: place.name,
+        lat: place.lat,
+        lon: place.lon,
+        category: place.category
+      };
+      if (!checkDuplicate(newLoc, uniqueLocations)) {
+        uniqueLocations.push(newLoc);
+      } else {
+        hadDuplicates = true;
+      }
+    });
     
-    setLocations(mappedLocations.slice(0, 5));
+    if (hadDuplicates) {
+      setDuplicateMsg("Some duplicate places were skipped.");
+      setTimeout(() => setDuplicateMsg(''), 3000);
+    }
+    setLocations(uniqueLocations.slice(0, 5));
     setTripParams(params);
   };
 
@@ -121,6 +147,12 @@ export default function Planner() {
               </div>
             )}
 
+            {duplicateMsg && (
+              <div className="mb-4 p-2 bg-yellow-50 border border-yellow-200 text-yellow-800 text-sm rounded">
+                {duplicateMsg}
+              </div>
+            )}
+
             <ItineraryForm 
               locations={locations}
               setLocations={setLocations}
@@ -128,6 +160,8 @@ export default function Planner() {
               setTravelMode={setTravelMode}
               onCalculateRoute={handleCalculateRoute}
               isCalculating={isCalculating}
+              checkDuplicate={checkDuplicate}
+              setDuplicateMsg={setDuplicateMsg}
             />
             
             {routes.length > 0 && (

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { joinTrip, saveGeneratedItinerary } from '../lib/db';
@@ -48,6 +48,11 @@ export default function Lobby() {
 
   const isHost = localStorage.getItem(`host_${id}`) === 'true';
 
+  const fetchParticipants = useCallback(async () => {
+    const { data } = await supabase.from('trip_participants').select('*').eq('trip_id', id);
+    if (data) setParticipants(data);
+  }, [id]);
+
   useEffect(() => {
     fetchParticipants();
     const channel = supabase
@@ -68,7 +73,7 @@ export default function Lobby() {
     const interval = setInterval(async () => {
       fetchParticipants();
       // Fallback poll: check if locations exist yet (for non-realtime users)
-      const { data } = await supabase.from('trip_locations').select('id').eq('trip_id', id).limit(1);
+      const { data } = await supabase.from('trip_locations').select('location_id').eq('trip_id', id).limit(1);
       if (data && data.length > 0) navigate(`/timeline/${id}`);
     }, 3000);
 
@@ -77,12 +82,7 @@ export default function Lobby() {
       supabase.removeChannel(tripGenChannel);
       clearInterval(interval);
     };
-  }, [id]);
-
-  const fetchParticipants = async () => {
-    const { data } = await supabase.from('trip_participants').select('*').eq('trip_id', id);
-    if (data) setParticipants(data);
-  };
+  }, [id, fetchParticipants, navigate]);
 
   const handleLocationSearch = async (query, setResults) => {
     if (!query || query.trim().length < 2) return;

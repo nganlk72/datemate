@@ -1,5 +1,11 @@
 import { supabase } from './supabase';
 
+/** Normalise a place name for use in a dedup key: lowercase, strip non-alphanumeric, cap at 20 chars. */
+const norm = (s) => (s || '').normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '').slice(0, 20);
+/** Build a stable, human-readable dedup key from lat/lon + name. */
+const placeKey = (lat, lon, name) =>
+  `${Number(lat).toFixed(5)},${Number(lon).toFixed(5)}-${norm(name)}`;
+
 export async function createGroupTrip(tripParams, locations) {
   const { data: trip, error: tripError } = await supabase
     .from('trips')
@@ -15,7 +21,7 @@ export async function createGroupTrip(tripParams, locations) {
   if (tripError) throw tripError;
 
   const locationInserts = locations.map(loc => ({
-    place_key: `${Number(loc.lat).toFixed(5)},${Number(loc.lon).toFixed(5)}`, // stable dedup key with 5 decimal precision
+    place_key: placeKey(loc.lat, loc.lon, loc.name || loc.displayName),
     name: loc.name || loc.displayName,
     lat: loc.lat,
     lon: loc.lon,
@@ -78,8 +84,8 @@ export async function saveGeneratedItinerary(tripId, locations, city, meetupMode
 
   // Upsert locations
   const locationInserts = locations.map(loc => ({
-    place_key: `${Number(loc.lat).toFixed(5)},${Number(loc.lon).toFixed(5)}`,
-    name: loc.name,
+    place_key: placeKey(loc.lat, loc.lon, loc.name || loc.displayName),
+    name: loc.name || loc.displayName,
     lat: loc.lat,
     lon: loc.lon,
     category: loc.category || 'unknown'

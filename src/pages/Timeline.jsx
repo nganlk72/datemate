@@ -1,15 +1,18 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useState} from 'react';
 import { useParams } from 'react-router-dom';
-import axios from 'axios';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import { supabase } from '../lib/supabase';
 import { fetchTripData, updateUserLocation, updateLocationCost, updateStopDuration, updateTripSettings } from '../lib/db';
 import { Map, Navigation, GripVertical, Clock, Car, Bike, Footprints, RefreshCw, Loader2, Info, Settings2, X } from 'lucide-react';
 import LocationInsights from '../components/LocationInsights';
-import { getRoute } from '../lib/vietmap';
+import { getRoute, getCachedRoute } from '../lib/vietmap';
 import TimelineMap from '../components/TimelineMap';
 
-const TRANSPORT_COLORS = { car: '#4f46e5', motorcycle: '#16a34a', foot: '#ea580c' };
+const TRANSPORT_COLORS = {
+  car: '#4f46e5', motorcycle: '#16a34a', foot: '#ea580c',
+  // Legacy / OSRM aliases — kept in sync with VEHICLE_PROFILES in vietmap.js
+  driving: '#4f46e5', cycling: '#16a34a', walking: '#ea580c',
+};
 
 
 
@@ -22,7 +25,7 @@ function fmtClock(min) {
 }
 
 /**
- * Build a full schedule from the ordered locations + OSRM group route legs.
+ * Build a full schedule from the ordered locations + Vietmap group route legs.
  * Returns an array of { ...loc, arrivalMin, departureMin } in minutes-from-midnight.
  */
 function buildSchedule(locations, groupRoute, startTime, trafficMult) {
@@ -55,55 +58,20 @@ export default function Timeline() {
   const [liveUsers, setLiveUsers] = useState({});
   const [groupRoute, setGroupRoute] = useState(null);
   const [personalRoutes, setPersonalRoutes] = useState({}); // keyed by participant name
-  const [navSteps, setNavSteps] = useState([]);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [inspectedLocation, setInspectedLocation] = useState(null);
-  const [schedule, setSchedule] = useState([]);
 
   // User identity (they picked this in the Lobby form)
   const [myName] = useState(() => localStorage.getItem(`name_${id}`) || '');
   const [myEmoji] = useState(() => localStorage.getItem(`emoji_${id}`) || '🐶');
 
-  useEffect(() => {
-    loadData();
-
-    // Live user locations channel
-    const locChannel = supabase.channel(`locations_${id}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_locations', filter: `trip_id=eq.${id}` },
-        (payload) => {
-          const u = payload.new;
-          setLiveUsers(prev => ({ ...prev, [u.participant_name]: u }));
-        }
-      ).subscribe();
-
-    // GPS tracking
-    let watchId = null;
-    if (navigator.geolocation) {
-      watchId = navigator.geolocation.watchPosition(pos => {
-        const { latitude: lat, longitude: lon } = pos.coords;
-        if (myName) updateUserLocation(id, myName, myEmoji, lat, lon);
-        setLiveUsers(prev => ({ ...prev, [myName]: { participant_name: myName, avatar_emoji: myEmoji, lat, lon } }));
-      }, null, { enableHighAccuracy: true, maximumAge: 5000 });
+  // Derive schedule synchronously — no useState + useEffect needed
+  const schedule = useMemo(() => {
+    if (trip && locations.length > 0) {
+      return buildSchedule(locations, groupRoute, trip.start_time || '09:00', trip.traffic_multiplier || 1.2);
     }
-
-    return () => {
-      supabase.removeChannel(locChannel);
-      if (watchId) navigator.geolocation.clearWatch(watchId);
-    };
-  }, [id, myName, myEmoji]);
-
-  const loadData = async () => {
-    const data = await fetchTripData(id);
-    setTrip(data.trip);
-    setLocations(data.locations);
-    setParticipants(data.participants);
-    if (data.locations.length >= 2) {
-      await calculateGroupRoute(data.locations);
-    }
-    if (data.participants.length > 0 && data.locations.length > 0) {
-      await calculatePersonalRoutes(data.participants, data.locations[0], data.trip);
-    }
-  };
+    return [];
+  }, [locations, groupRoute, trip]);
 
   const calculateGroupRoute = async (locs) => {
     if (locs.length < 2) return;
@@ -143,6 +111,48 @@ export default function Timeline() {
     setPersonalRoutes(routes);
   };
 
+  const loadData = useCallback(async () => {
+    const data = await fetchTripData(id);
+    setTrip(data.trip);
+    setLocations(data.locations);
+    setParticipants(data.participants);
+    if (data.locations.length >= 2) {
+      await calculateGroupRoute(data.locations);
+    }
+    if (data.participants.length > 0 && data.locations.length > 0) {
+      await calculatePersonalRoutes(data.participants, data.locations[0], data.trip);
+    }
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    loadData();
+
+    // Live user locations channel
+    const locChannel = supabase.channel(`locations_${id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_locations', filter: `trip_id=eq.${id}` },
+        (payload) => {
+          const u = payload.new;
+          setLiveUsers(prev => ({ ...prev, [u.participant_name]: u }));
+        }
+      ).subscribe();
+
+    // GPS tracking
+    let watchId = null;
+    if (navigator.geolocation) {
+      watchId = navigator.geolocation.watchPosition(pos => {
+        const { latitude: lat, longitude: lon } = pos.coords;
+        if (myName) updateUserLocation(id, myName, myEmoji, lat, lon);
+        setLiveUsers(prev => ({ ...prev, [myName]: { participant_name: myName, avatar_emoji: myEmoji, lat, lon } }));
+      }, null, { enableHighAccuracy: true, maximumAge: 5000 });
+    }
+
+    return () => {
+      supabase.removeChannel(locChannel);
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+    };
+  }, [id, myName, myEmoji, loadData]);
+
+
   const handleCostChange = (locId, val) => {
     const cost = parseInt(val) || 0;
     setLocations(current => current.map(l => l.id === locId ? { ...l, estimated_cost: cost } : l));
@@ -157,12 +167,6 @@ export default function Timeline() {
     }
   };
 
-  // Rebuild the schedule whenever locations, route, or trip settings change
-  useEffect(() => {
-    if (trip && locations.length > 0) {
-      setSchedule(buildSchedule(locations, groupRoute, trip.start_time || '09:00', trip.traffic_multiplier || 1.2));
-    }
-  }, [locations, groupRoute, trip]);
 
   const handleDurationChange = (locId, val) => {
     const mins = Math.max(1, parseInt(val) || 60);

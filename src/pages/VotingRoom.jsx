@@ -1,14 +1,48 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import MapContainer from '../components/MapContainer';
-import { ThumbsUp, MapPin, Copy, Check, X } from 'lucide-react';
+import { ThumbsUp, Copy, Check, X } from 'lucide-react';
 
 export default function VotingRoom() {
   const { id } = useParams();
   const [trip, setTrip] = useState(null);
   const [locations, setLocations] = useState([]);
   const [copied, setCopied] = useState(false);
+
+  const fetchTripData = useCallback(async () => {
+    // 1. Fetch Trip Details
+    const { data: tripData } = await supabase
+      .from('trips')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (tripData) setTrip(tripData);
+
+    // 2. Fetch associated locations and their votes
+    const { data: locData } = await supabase
+      .from('trip_locations')
+      .select(`
+        votes,
+        location_id,
+        locations ( name, lat, lon, category )
+      `)
+      .eq('trip_id', id);
+
+    if (locData) {
+      const formattedLocs = locData.map(item => ({
+        id: item.location_id,
+        location_id: item.location_id,
+        votes: item.votes,
+        ...item.locations,
+        displayName: item.locations.name
+      }));
+      // Sort by most votes
+      formattedLocs.sort((a, b) => b.votes - a.votes);
+      setLocations(formattedLocs);
+    }
+  }, [id]);
 
   useEffect(() => {
     fetchTripData();
@@ -40,41 +74,7 @@ export default function VotingRoom() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [id]);
-
-  const fetchTripData = async () => {
-    // 1. Fetch Trip Details
-    const { data: tripData } = await supabase
-      .from('trips')
-      .select('*')
-      .eq('id', id)
-      .single();
-    
-    if (tripData) setTrip(tripData);
-
-    // 2. Fetch associated locations and their votes
-    const { data: locData } = await supabase
-      .from('trip_locations')
-      .select(`
-        votes,
-        location_id,
-        locations ( osm_id, name, lat, lon, category )
-      `)
-      .eq('trip_id', id);
-
-    if (locData) {
-      const formattedLocs = locData.map(item => ({
-        id: item.location_id,
-        location_id: item.location_id,
-        votes: item.votes,
-        ...item.locations,
-        displayName: item.locations.name
-      }));
-      // Sort by most votes
-      formattedLocs.sort((a, b) => b.votes - a.votes);
-      setLocations(formattedLocs);
-    }
-  };
+  }, [id, fetchTripData]);
 
   const handleVote = async (locationId, currentVotes) => {
     // Optimistic UI update
